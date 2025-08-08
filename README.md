@@ -11,9 +11,55 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 - ⏮️ ⏭️ **History Navigation:** Go back and forward through viewed images.
 - 🕒 **Auto-Advance Timer:** Automatically switch to a new random image at set intervals, with a circular countdown overlay.
 - 🔍 **Zoom:** Zoom in/out/reset with mouse wheel, keyboard, or context menu.
-- 🖱️ **Context Menu:** Right-click the image for all main actions (open folder, next/prev, zoom, timer, settings, etc.).
-- 🌑 **Dark Theme:** Clean, minimal dark UI.
+- 🖱️ **Smart Context Menu:** Right-click for actions (auto-hides when zoomed to avoid pan interference).
+- 🎨 **OS-Adaptive Theme:** Automatically detects Windows dark/light mode preferences.
+- ⌨️ **Full Keyboard Support:** Complete shortcut system for all operations.
+- 🔄 **Image Transformations:** Flip horizontal/vertical with visual state indicators.
+- 📐 **Professional Line Drawing:** Three-mode annotation system with free line tool.
 - 🖥️ **Cross-platform:** Works on Windows, macOS, and Linux.
+
+---
+
+## 🆕 **Latest Enhancements (January 2025)**
+
+### 🔄 **Image Flip Operations**
+- **Horizontal Flip**: `⟷` button and `Ctrl+H` shortcut
+- **Vertical Flip**: `↕` button and `Ctrl+V` shortcut  
+- **Visual State Indicators**: Checkable buttons show current flip status
+- **Context Menu Integration**: Flip options accessible via right-click
+- **Smart Reset**: Flips automatically reset when navigating to new images
+
+### 🎨 **OS-Adaptive Theme System**
+- **Windows Dark Mode Detection**: Automatically reads Windows registry settings
+- **Dual Theme Support**: 
+  - Professional dark theme for dark mode users
+  - Clean light theme matching Windows 11 aesthetics
+- **Automatic Selection**: Seamlessly adapts to user's OS preferences
+- **Cross-Platform Fallback**: Defaults to dark theme on non-Windows systems
+
+### 🖱️ **Enhanced Context Menu**
+- **Smart Behavior**: Automatically hides when zoomed in to avoid panning interference
+- **Comprehensive Options**: 
+  - Navigation (Previous/Next, Open folder)
+  - Zoom controls with displayed keyboard shortcuts
+  - Image transformations (Flip operations)
+  - Quick settings access
+- **Professional Layout**: Well-organized menu structure with separators
+
+### ⌨️ **Extended Keyboard Shortcuts**
+| Shortcut | Action |
+|----------|--------|
+| `←` / `→` | Navigate image history |
+| `Ctrl++` / `Ctrl+=` | Zoom in |
+| `Ctrl+-` | Zoom out |
+| `Ctrl+0` | Reset zoom to 100% |
+| `Ctrl+H` | Flip horizontal |
+| `Ctrl+V` | Flip vertical |
+
+### 🛡️ **Improved Stability**
+- **Enhanced Error Handling**: Better graceful degradation for corrupted files
+- **Memory Management**: Optimized cache clearing for transformation operations
+- **Performance Tuning**: Improved bounds checking prevents line rendering issues
 
 ---
 
@@ -157,6 +203,9 @@ This represents a significant evolution from a basic random image viewer to a pr
    uv pip install pyside6
    ```
 
+### 🎨 **Theme Detection (Windows)**
+On Windows systems, the application automatically detects your OS dark/light mode preference from the registry. No additional setup required - it just works!
+
 ---
 
 ## How to Run
@@ -194,14 +243,38 @@ This represents a significant evolution from a basic random image viewer to a pr
 
 ## Keyboard Shortcuts & Context Menu Actions
 
+### ⌨️ **Keyboard Shortcuts**
 - **Left Arrow:** Previous image
 - **Right Arrow:** Next image (random if at end)
 - **Ctrl + +:** Zoom in
 - **Ctrl + -:** Zoom out
 - **Ctrl + 0:** Reset zoom
-- **Context Menu (right-click):**
+- **Ctrl + H:** Flip image horizontally *(NEW)*
+- **Ctrl + V:** Flip image vertically *(NEW)*
+
+### 🖱️ **Smart Context Menu (right-click)**
+*Automatically hides when zoomed to avoid panning interference*
+- **Navigation:**
   - Open Folder
   - Previous/Next Random Image
+- **Zoom Controls:**
+  - Zoom In (`Ctrl++`)
+  - Zoom Out (`Ctrl+-`)
+  - Reset Zoom (`Ctrl+0`)
+- **Image Transformations:** *(NEW)*
+  - Flip Horizontal (`Ctrl+H`)
+  - Flip Vertical (`Ctrl+V`)
+- **Settings:**
+  - Grayscale Toggle
+
+### 🎯 **Quick Usage Guide**
+
+#### Image Transformation Workflow
+1. **Flip Operations**: Use toolbar buttons `⟷` `↕` or keyboard shortcuts `Ctrl+H` `Ctrl+V`
+   - Buttons show current state (highlighted when active)
+   - Flips automatically reset when navigating to new images
+2. **Rotation + Flip**: Combine rotation (`↻` button) with flips for complete control
+3. **Line Drawing**: All transformation work seamlessly with line annotation tools
   - Zoom In/Out/Reset
   - Enable Timer & set interval
   - Show History Panel
@@ -254,6 +327,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
