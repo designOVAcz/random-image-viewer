@@ -3,15 +3,81 @@ import os
 import random
 import time
 import subprocess
+import gc
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QFileDialog, QVBoxLayout, QWidget,
     QListWidget, QListWidgetItem, QSplitter, QSpinBox, QCheckBox,
-    QStatusBar, QToolBar, QToolButton, QSizePolicy, QComboBox, QMenu, QInputDialog
+    QStatusBar, QToolBar, QToolButton, QSizePolicy, QSlider, QHBoxLayout,
+    QStyle, QStyleOptionSlider, QGridLayout
 )
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QImage, QTransform, QAction
-from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QSettings, Signal
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform
+from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QRect
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
+
+def setup_image_allocation_limit():
+    """Increase Qt's image allocation limit to handle large images"""
+    # Set allocation limit to 1GB (1024 MB) instead of default 256 MB
+    QImageReader.setAllocationLimit(1024)
+
+def get_image_file_size(file_path):
+    """Get file size in MB for display purposes"""
+    try:
+        size_bytes = os.path.getsize(file_path)
+        size_mb = size_bytes / (1024 * 1024)
+        return size_mb
+    except OSError:
+        return 0
+
+def smart_load_pixmap(file_path, max_dimension=2048):
+    """Load pixmap with smart downscaling for better performance"""
+    try:
+        # Check file size first
+        file_size_mb = get_image_file_size(file_path)
+        
+        # Use QImageReader for better control over loading
+        reader = QImageReader(file_path)
+        if not reader.canRead():
+            return None, f"Cannot read image format"
+        
+        # Get original size without loading the full image
+        original_size = reader.size()
+        if not original_size.isValid():
+            return None, f"Invalid image dimensions"
+        
+        # Calculate if we need to scale down for performance
+        scale_factor = 1.0
+        if original_size.width() > max_dimension or original_size.height() > max_dimension:
+            scale_factor = max_dimension / max(original_size.width(), original_size.height())
+            scaled_size = QSize(
+                int(original_size.width() * scale_factor),
+                int(original_size.height() * scale_factor)
+            )
+            reader.setScaledSize(scaled_size)
+        
+        # Load the image (potentially scaled)
+        image = reader.read()
+        if image.isNull():
+            return None, f"Failed to load image"
+        
+        # Convert to pixmap
+        pixmap = QPixmap.fromImage(image)
+        
+        # For very large files, warn but continue
+        if file_size_mb > 100:
+            print(f"Large image loaded with scaling ({file_size_mb:.1f} MB): {os.path.basename(file_path)}")
+        
+        return pixmap, None
+        
+    except Exception as e:
+        error_msg = f"Error loading image: {str(e)}"
+        print(f"Exception loading {os.path.basename(file_path)}: {error_msg}")
+        return None, error_msg
+
+def safe_load_pixmap(file_path):
+    """Safely load a pixmap with error handling for large images"""
+    # Use the smart loader for better performance
+    return smart_load_pixmap(file_path)
 
 def get_images_in_folder(folder):
     image_paths = []
@@ -32,6 +98,48 @@ def emoji_icon(emoji="🎲", size=128):
     p.end()
     return QIcon(pix)
 
+class ClickableSlider(QSlider):
+    """A slider that allows clicking anywhere on the track to jump to that position"""
+    
+    def __init__(self, orientation=Qt.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Get the slider's style options
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            
+            # Get the groove rect (the track area)
+            groove_rect = self.style().subControlRect(
+                QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self
+            )
+            
+            if self.orientation() == Qt.Horizontal:
+                # Calculate the position as a percentage of the groove width
+                click_pos = event.position().x() - groove_rect.x()
+                groove_width = groove_rect.width()
+                if groove_width > 0:
+                    percentage = max(0.0, min(1.0, click_pos / groove_width))
+                    # Calculate the new value based on the slider's range
+                    value_range = self.maximum() - self.minimum()
+                    new_value = self.minimum() + int(percentage * value_range)
+                    self.setValue(new_value)
+                    return
+            else:  # Vertical orientation
+                click_pos = event.position().y() - groove_rect.y()
+                groove_height = groove_rect.height()
+                if groove_height > 0:
+                    # For vertical sliders, top = maximum, bottom = minimum
+                    percentage = max(0.0, min(1.0, 1.0 - (click_pos / groove_height)))
+                    value_range = self.maximum() - self.minimum()
+                    new_value = self.minimum() + int(percentage * value_range)
+                    self.setValue(new_value)
+                    return
+        
+        # Fall back to default behavior for dragging
+        super().mousePressEvent(event)
+
 DARK_STYLESHEET = """
 QWidget { background-color: #232629; color: #b7bcc1; font-size: 11px; }
 QLabel, QCheckBox, QSpinBox, QListWidget, QToolButton { font-size: 11px; color: #b7bcc1; }
@@ -48,6 +156,7 @@ QPushButton, QToolButton {
     padding: 0 2px;
 }
 QPushButton:hover, QToolButton:hover { background: #2e3034; }
+QPushButton:checked, QToolButton:checked { background: #3b7dd8; color: #fff; }
 QListWidget::item:selected { background: #354e6e; color: #fff; }
 QCheckBox:checked { color: #3b7dd8; }
 QToolBar::separator {
@@ -67,12 +176,22 @@ class CircularCountdown(QWidget):
         self.total_time = 0
         self.remaining_time = 0      # The actual time left
         self.displayed_time = 0      # The smooth UI value
+        self.parent_viewer = None    # Reference to main viewer
+        self.is_paused = False       # Pause state indicator
         self.setFixedSize(QSize(24, 24))
+        self.setCursor(Qt.PointingHandCursor)  # Show it's clickable
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
         self._timer.start(16)  # ~60 FPS
 
         self._last_update = time.monotonic()
+
+    def set_parent_viewer(self, viewer):
+        self.parent_viewer = viewer
+
+    def set_paused(self, paused):
+        self.is_paused = paused
+        self.update()  # Redraw with pause indicator
 
     def set_total_time(self, seconds):
         self.total_time = float(max(1, seconds))
@@ -102,30 +221,421 @@ class CircularCountdown(QWidget):
         if self.total_time > 0 and self.displayed_time > 0:
             fraction = self.displayed_time / self.total_time
             angle = int(360 * 16 * fraction)
-            painter.setPen(QPen(QColor("#80b2ff"), 3))
+            # Use different color when paused
+            color = "#ff8080" if self.is_paused else "#80b2ff"
+            painter.setPen(QPen(QColor(color), 3))
             painter.drawArc(rect, 90 * 16, -angle)
+            
+        # Draw pause indicator when paused
+        if self.is_paused and self.total_time > 0:
+            painter.setPen(QPen(QColor("#ff8080"), 2))
+            painter.setBrush(QColor("#ff8080"))
+            # Draw two small vertical bars (pause symbol)
+            center_x = rect.center().x()
+            center_y = rect.center().y()
+            bar_height = 6
+            bar_width = 2
+            bar1_rect = QRect(center_x - 3, center_y - bar_height//2, bar_width, bar_height)
+            bar2_rect = QRect(center_x + 1, center_y - bar_height//2, bar_width, bar_height)
+            painter.drawRect(bar1_rect)
+            painter.drawRect(bar2_rect)
 
-class ClickableLabel(QLabel):
-    clicked = Signal()
-    mouse_nav = True  # Always enabled
-    back = Signal()
-    forward = Signal()
-    wheel_zoom = Signal(float)  # NEW: Signal for zooming, emits delta
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        elif self.mouse_nav:
-            if event.button() == Qt.BackButton:
-                self.back.emit()
-            elif event.button() == Qt.ForwardButton:
-                self.forward.emit()
+        if event.button() == Qt.LeftButton and self.parent_viewer:
+            # Only allow pause/resume when timer is active
+            if self.parent_viewer._auto_advance_active:
+                self.parent_viewer.toggle_timer_pause()
         super().mousePressEvent(event)
+
+class ImageLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_viewer = None
+        self.setMouseTracking(True)
+        
+        # Zoom functionality
+        self.zoom_factor = 1.0
+        self.min_zoom = 0.1
+        self.max_zoom = 10.0
+        self.zoom_step = 0.1
+        
+        # Pan functionality for when zoomed
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
+        self.is_panning = False
+        self.last_pan_point = None
+        
+        # Store original pixmap size for proper zoom calculations
+        self.original_pixmap = None
+        
     def wheelEvent(self, event):
-        # Only emit if Ctrl is pressed or always? Let's do always for now
-        angle = event.angleDelta().y()
-        if angle != 0:
-            self.wheel_zoom.emit(angle)
-        super().wheelEvent(event)
+        """Handle mouse wheel events for zooming"""
+        if (self.parent_viewer and 
+            self.parent_viewer.current_image and 
+            self.pixmap() and 
+            not self.pixmap().isNull()):
+            
+            # Accept the event to prevent it from propagating
+            event.accept()
+            
+            # Get the wheel delta (positive = zoom in, negative = zoom out)
+            delta = event.angleDelta().y()
+            
+            # Store mouse position for zoom centering
+            mouse_pos = event.position()
+            
+            old_zoom = self.zoom_factor
+            
+            if delta > 0:
+                # Zoom in
+                new_zoom = min(self.zoom_factor * 1.1, self.max_zoom)
+            else:
+                # Zoom out
+                new_zoom = max(self.zoom_factor / 1.1, self.min_zoom)
+            
+            if new_zoom != self.zoom_factor:
+                # Calculate zoom center point
+                if new_zoom > old_zoom:  # Zooming in
+                    # Adjust pan offset to keep mouse position centered
+                    zoom_ratio = new_zoom / old_zoom
+                    widget_center_x = self.width() / 2
+                    widget_center_y = self.height() / 2
+                    
+                    # Calculate offset from center
+                    offset_from_center_x = mouse_pos.x() - widget_center_x
+                    offset_from_center_y = mouse_pos.y() - widget_center_y
+                    
+                    # Adjust pan to keep point under mouse
+                    self.pan_offset_x = self.pan_offset_x * zoom_ratio - offset_from_center_x * (zoom_ratio - 1)
+                    self.pan_offset_y = self.pan_offset_y * zoom_ratio - offset_from_center_y * (zoom_ratio - 1)
+                else:  # Zooming out
+                    zoom_ratio = new_zoom / old_zoom
+                    self.pan_offset_x *= zoom_ratio
+                    self.pan_offset_y *= zoom_ratio
+                
+                self.zoom_factor = new_zoom
+                
+                # Reset pan when back to 100% or below
+                if self.zoom_factor <= 1.0:
+                    self.pan_offset_x = 0
+                    self.pan_offset_y = 0
+                    self.zoom_factor = 1.0
+                
+                # Trigger image redisplay with new zoom
+                self.parent_viewer.display_image(self.parent_viewer.current_image)
+                
+                # Update status to show zoom level
+                zoom_percent = int(self.zoom_factor * 100)
+                if self.zoom_factor > 1.0:
+                    self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}% (Right-click drag to pan)")
+                else:
+                    self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}%")
+        else:
+            # Don't accept the event, let it propagate
+            event.ignore()
+    
+    def mousePressEvent(self, event):
+        # Handle middle-click for next image
+        if event.button() == Qt.MiddleButton and self.parent_viewer:
+            self.parent_viewer.show_next_image()
+            event.accept()
+            return
+        
+        # Handle right-click for panning when zoomed
+        if (event.button() == Qt.RightButton and 
+            self.zoom_factor > 1.0 and 
+            self.pixmap() and 
+            not self.pixmap().isNull()):
+            
+            self.is_panning = True
+            self.last_pan_point = event.position()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        
+        # Handle left-click for line drawing
+        if (self.parent_viewer and 
+            (self.parent_viewer.line_drawing_mode or self.parent_viewer.horizontal_line_drawing_mode or self.parent_viewer.free_line_drawing_mode) and 
+            event.button() == Qt.LeftButton and 
+            self.pixmap() and not self.pixmap().isNull()):
+            
+            # Get click position
+            click_pos = event.position()
+            
+            # Get the currently displayed pixmap and label size
+            displayed_pixmap = self.pixmap()
+            label_size = self.size()
+            
+            # Get original image for coordinate reference
+            try:
+                original_pixmap, error = safe_load_pixmap(self.parent_viewer.current_image)
+                if error or original_pixmap.isNull():
+                    return
+            except Exception:
+                return
+            
+            # Use the original unrotated size for coordinate transformation
+            original_size = original_pixmap.size()
+            
+            # For rotated images, we need to consider the displayed dimensions
+            # The displayed image might have swapped width/height due to rotation
+            rotation = self.parent_viewer.rotation_angle
+            if rotation == 90 or rotation == 270:
+                # At 90° and 270°, width and height are swapped
+                display_reference_size = QSize(original_size.height(), original_size.width())
+            else:
+                # At 0° and 180°, dimensions stay the same
+                display_reference_size = original_size
+            
+            # UNIFIED coordinate conversion - use the SAME logic as in display_image
+            # Calculate the base scaled size that would be used at 100% zoom
+            base_scaled = display_reference_size.scaled(label_size, Qt.KeepAspectRatio)
+            
+            # Apply zoom factor to get the actual displayed size
+            zoomed_width = int(base_scaled.width() * self.zoom_factor)
+            zoomed_height = int(base_scaled.height() * self.zoom_factor)
+            
+            # Calculate position within the label (including pan offset)
+            draw_x = (label_size.width() - zoomed_width) // 2 + int(self.pan_offset_x)
+            draw_y = (label_size.height() - zoomed_height) // 2 + int(self.pan_offset_y)
+            
+            # Get click position relative to the zoomed image
+            rel_x = click_pos.x() - draw_x
+            rel_y = click_pos.y() - draw_y
+            
+            # Check if click is within the zoomed image bounds
+            if (0 <= rel_x <= zoomed_width and 0 <= rel_y <= zoomed_height):
+                # Convert to display coordinate space using same scale factors as display
+                scale_x = zoomed_width / display_reference_size.width()
+                scale_y = zoomed_height / display_reference_size.height()
+                
+                # Convert to display coordinates (relative to the rotated image)
+                display_x = rel_x / scale_x
+                display_y = rel_y / scale_y
+                
+                # Transform coordinates back to original unrotated coordinate space
+                rotation = self.parent_viewer.rotation_angle
+                if rotation == 0:
+                    # No rotation
+                    original_x = display_x
+                    original_y = display_y
+                elif rotation == 90:
+                    # 90° clockwise: For a point in rotated space, map back to original space
+                    # In rotated space: click on what appears as (display_x, display_y)
+                    # In original space: this corresponds to (original_y came from display_x, original_x came from height-display_y)
+                    original_x = display_reference_size.height() - display_y
+                    original_y = display_x
+                elif rotation == 180:
+                    # 180°: both coordinates are flipped
+                    original_x = original_size.width() - display_x
+                    original_y = original_size.height() - display_y
+                elif rotation == 270:
+                    # 270° clockwise: Map back from rotated to original space
+                    original_x = display_y
+                    original_y = display_reference_size.width() - display_x
+                else:
+                    # Fallback for other angles
+                    original_x = display_x
+                    original_y = display_y
+                
+                # Add lines using original coordinates (these will be transformed during display)
+                if self.parent_viewer.line_drawing_mode:
+                    self.parent_viewer.add_line(original_x)
+                if self.parent_viewer.horizontal_line_drawing_mode:
+                    self.parent_viewer.add_hline(original_y)
+                if self.parent_viewer.free_line_drawing_mode:
+                    self.parent_viewer.add_free_line_point(original_x, original_y)
+        
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        if self.is_panning and self.last_pan_point is not None:
+            # Calculate pan delta
+            current_point = event.position()
+            delta_x = current_point.x() - self.last_pan_point.x()
+            delta_y = current_point.y() - self.last_pan_point.y()
+            
+            # Update pan offset
+            self.pan_offset_x += delta_x
+            self.pan_offset_y += delta_y
+            
+            # Update last point
+            self.last_pan_point = current_point
+            
+            # Refresh the display
+            if self.parent_viewer and self.parent_viewer.current_image:
+                self.parent_viewer.display_image(self.parent_viewer.current_image)
+            
+            event.accept()
+            return
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton and self.is_panning:
+            self.is_panning = False
+            self.last_pan_point = None
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        
+        super().mouseReleaseEvent(event)
+    
+    def reset_zoom(self):
+        """Reset zoom to 100% and clear pan"""
+        self.zoom_factor = 1.0
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
+
+class ResponsiveEnhancementWidget(QWidget):
+    """A responsive widget that adapts layout based on available width"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_viewer = None
+        self.min_width_threshold = 280  # Reduced threshold for better detection
+        self.current_layout_mode = "horizontal"  # Track current layout
+        
+        # Set minimum size to ensure visibility
+        self.setMinimumSize(270, 24)
+        self.setMaximumHeight(48)  # Allow for vertical layout
+        
+        # Create all controls
+        self.create_controls()
+        self.setup_horizontal_layout()  # Start with horizontal layout
+        
+    def create_controls(self):
+        """Create all the enhancement controls"""
+        # Grayscale controls
+        self.gray_label = QLabel("Gray:")
+        self.gray_label.setFixedWidth(30)
+        self.gray_label.setStyleSheet("font-size: 9px;")
+        
+        self.grayscale_slider = ClickableSlider(Qt.Horizontal)
+        self.grayscale_slider.setRange(0, 100)
+        self.grayscale_slider.setValue(0)
+        self.grayscale_slider.setFixedWidth(60)
+        self.grayscale_slider.setFixedHeight(20)
+        self.grayscale_slider.setToolTip("Grayscale: 0=Color, 100=B&W")
+        
+        # Contrast controls
+        self.contrast_label = QLabel("Con:")
+        self.contrast_label.setFixedWidth(25)
+        self.contrast_label.setStyleSheet("font-size: 9px;")
+        
+        self.contrast_slider = ClickableSlider(Qt.Horizontal)
+        self.contrast_slider.setRange(0, 200)
+        self.contrast_slider.setValue(50)
+        self.contrast_slider.setFixedWidth(60)
+        self.contrast_slider.setFixedHeight(20)
+        self.contrast_slider.setToolTip("Contrast: 50=Normal, 0=Flat, 200=Extreme")
+        
+        # Gamma controls
+        self.gamma_label = QLabel("Gam:")
+        self.gamma_label.setFixedWidth(25)
+        self.gamma_label.setStyleSheet("font-size: 9px;")
+        
+        self.gamma_slider = ClickableSlider(Qt.Horizontal)
+        self.gamma_slider.setRange(0, 200)
+        self.gamma_slider.setValue(50)
+        self.gamma_slider.setFixedWidth(60)
+        self.gamma_slider.setFixedHeight(20)
+        self.gamma_slider.setToolTip("Gamma: 50=Normal, 0=Very Dark, 200=Very Bright")
+        
+        # Reset button
+        self.reset_btn = QToolButton()
+        self.reset_btn.setText("↺")
+        self.reset_btn.setToolTip("Reset Enhancements")
+        self.reset_btn.setFixedSize(16, 20)
+    
+    def setup_horizontal_layout(self):
+        """Setup horizontal layout for wide windows"""
+        self.clear_layout()
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)  # Small margins
+        layout.setSpacing(2)
+        
+        layout.addWidget(self.gray_label)
+        layout.addWidget(self.grayscale_slider)
+        layout.addWidget(self.contrast_label)
+        layout.addWidget(self.contrast_slider)
+        layout.addWidget(self.gamma_label)
+        layout.addWidget(self.gamma_slider)
+        layout.addWidget(self.reset_btn)
+        
+        self.current_layout_mode = "horizontal"
+        self.setMaximumHeight(24)  # Single row height
+        
+    def setup_vertical_layout(self):
+        """Setup vertical/grid layout for narrow windows"""
+        self.clear_layout()
+        
+        layout = QGridLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)  # Small margins
+        layout.setSpacing(1)
+        
+        # Row 1: Gray and Contrast
+        layout.addWidget(self.gray_label, 0, 0)
+        layout.addWidget(self.grayscale_slider, 0, 1)
+        layout.addWidget(self.contrast_label, 0, 2)
+        layout.addWidget(self.contrast_slider, 0, 3)
+        
+        # Row 2: Gamma and Reset
+        layout.addWidget(self.gamma_label, 1, 0)
+        layout.addWidget(self.gamma_slider, 1, 1)
+        layout.addWidget(self.reset_btn, 1, 2, 1, 2)  # Span 2 columns
+        
+        self.current_layout_mode = "vertical"
+        self.setMaximumHeight(48)  # Two row height
+    
+    def clear_layout(self):
+        """Remove all widgets from current layout"""
+        if self.layout():
+            while self.layout().count():
+                child = self.layout().takeAt(0)
+                if child.widget():
+                    child.widget().setParent(None)
+            # Schedule the layout for deletion
+            self.layout().deleteLater()
+    
+    def resizeEvent(self, event):
+        # Simple debounced resize handling
+        self.resize_timer.start(100)  # 100ms debounce
+        super().resizeEvent(event)
+        
+    def _delayed_resize(self):
+        """Handle resize events with a delay to improve performance"""
+        # Check if we need to move sliders to second row
+        current_width = self.width()
+        should_use_two_rows = current_width < self.width_threshold
+        
+        # Only switch if the mode actually needs to change AND we have minimal hysteresis
+        if should_use_two_rows != self.two_row_mode:
+            # Reduced hysteresis to prevent rapid switching
+            if should_use_two_rows and current_width < (self.width_threshold - 10):
+                self._update_toolbar_layout(current_width)
+            elif not should_use_two_rows and current_width > (self.width_threshold + 10):
+                self._update_toolbar_layout(current_width)
+        
+        # Handle image display resize
+        if self.current_image:
+            self.display_image(self.current_image)
+
+    def sizeHint(self):
+        """Provide a size hint for the layout system"""
+        if self.current_layout_mode == "horizontal":
+            return QSize(270, 24)
+        else:
+            return QSize(200, 48)
+    
+    def set_parent_viewer(self, viewer):
+        """Connect to parent viewer and setup signal connections"""
+        self.parent_viewer = viewer
+        self.grayscale_slider.valueChanged.connect(viewer.update_grayscale)
+        self.contrast_slider.valueChanged.connect(viewer.update_contrast)
+        self.gamma_slider.valueChanged.connect(viewer.update_gamma)
+        self.reset_btn.clicked.connect(viewer.reset_enhancements)
 
 class RandomImageViewer(QMainWindow):
     def __init__(self):
@@ -133,35 +643,87 @@ class RandomImageViewer(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setWindowTitle("Random Image Viewer")
         self.setGeometry(100, 100, 950, 650)
-        self.settings = QSettings("random-image-viewer", "RandomImageViewer")
-        last_folder = self.settings.value("last_folder", type=str)
-        if last_folder and os.path.exists(last_folder):
-            self.folder = last_folder
-        else:
-            self.folder = os.getcwd()
-        self.images = get_images_in_folder(self.folder)
+        self.folder = None
+        self.images = []
         self.history = []
         self.current_image = None
         self.current_index = -1
         self.history_index = -1  # NEW: For navigation
-        self.timer_interval = self.settings.value("timer_interval", 60, type=int)
+        
+        # Performance optimization: Cache management for large collections
+        self.pixmap_cache = {}  # Cache for loaded pixmaps
+        self.max_cache_size = 20  # Increased cache size for better performance with large collections
+        self.scaled_cache = {}  # Cache for scaled versions
+        self.last_size = None  # Track resize events
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.timeout.connect(self._delayed_resize)
+        self.resize_timer.setInterval(50)  # 50ms delay for resize debouncing
+        
+        # Line drawing functionality
+        self.line_drawing_mode = False
+        self.horizontal_line_drawing_mode = False
+        self.free_line_drawing_mode = False  # New: Free line drawing mode
+        self.drawn_lines = []  # List of x positions for vertical lines
+        self.drawn_horizontal_lines = []  # List of y positions for horizontal lines
+        self.drawn_free_lines = []  # List of free lines, each with start and end points
+        self.current_line_start = None  # Store first click point for free line
+        self.line_thickness = 1
+
+        # Always on top functionality
+        self.always_on_top = False
+
+        # Image enhancement parameters
+        self.grayscale_value = 0  # 0 = color, 100 = full grayscale
+        self.contrast_value = 50  # 50 = normal, 0-100 range
+        self.gamma_value = 50     # 50 = normal, 0-100 range
+        self.rotation_angle = 0   # Rotation angle in degrees
+        self.original_pixmap = None  # Cache original image for fast processing
+        self.enhancement_cache = {}  # Cache enhanced versions
+
+        self.timer_interval = 60  # seconds
         self.timer_remaining = 0
-        self._auto_advance_active = self.settings.value("auto_advance_enabled", False, type=bool)
-        self.show_history = self.settings.value("show_history_panel", False, type=bool)
+        self._auto_advance_active = False
+        self._timer_paused = False  # NEW: Timer pause state
+
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self._on_timer_tick)
-        self.zoom_factor = 1.0  # NEW: Track zoom
+
         self.init_ui()
-        self.update_image_info()
-        self._update_title()
-        self._initial_image_shown = False
 
     def init_ui(self):
-        # Remove toolbar and all buttons
-        # self.toolbar = QToolBar("Main Toolbar")
-        # self.addToolBar(self.toolbar)
+        # Create main toolbar
+        self.main_toolbar = QToolBar("Main Toolbar")
+        self.main_toolbar.setIconSize(QSize(20, 20))
+        self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
+        self.main_toolbar.setMovable(False)
+        self.main_toolbar.setStyleSheet("QToolBar { spacing: 4px; }")
 
+        # Force a toolbar break to ensure next toolbar goes on new line
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        
+        # Create secondary toolbar for sliders (initially hidden) - this will be BELOW main toolbar
+        self.slider_toolbar = QToolBar("Slider Toolbar")
+        self.slider_toolbar.setIconSize(QSize(20, 20))
+        self.addToolBar(Qt.TopToolBarArea, self.slider_toolbar)
+        self.slider_toolbar.setMovable(False)
+        self.slider_toolbar.setStyleSheet("QToolBar { spacing: 4px; background: #2a2d30; border-top: 1px solid #35383b; }")
+        self.slider_toolbar.setMinimumHeight(32)  # Ensure minimum height
+        self.slider_toolbar.setMaximumHeight(40)  # Set reasonable max height
+        self.slider_toolbar.hide()
+
+        # Track which mode we're in
+        self.two_row_mode = False
+        self.width_threshold = 900  # Increased threshold - switch to two rows below this width
+
+        # Setup main toolbar with all controls
+        self._setup_main_toolbar()
+        
+        # Setup enhancement controls on BOTH toolbars permanently
+        self._setup_enhancement_controls()
+
+        # Central widget and layout setup
         central_splitter = QSplitter(Qt.Horizontal)
         self.setCentralWidget(central_splitter)
 
@@ -169,22 +731,13 @@ class RandomImageViewer(QMainWindow):
         image_layout = QVBoxLayout(image_widget)
         image_layout.setContentsMargins(6, 6, 6, 6)
 
-        self.image_label = ClickableLabel("Open a folder to start", alignment=Qt.AlignCenter)
+        self.image_label = ImageLabel("Open a folder to start")
+        self.image_label.parent_viewer = self
+        self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setScaledContents(False)
         self.image_label.setMinimumSize(400, 400)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.image_label.setToolTip("")
-        self.image_label.clicked.connect(self.show_random_image)
-        self.image_label.back.connect(self.show_previous_image)
-        self.image_label.forward.connect(self.show_next_image)
-        self.image_label.wheel_zoom.connect(self.handle_wheel_zoom)  # NEW: connect wheel zoom
-        # Now set up context menu
-        self.image_label.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.image_label.customContextMenuRequested.connect(self.show_context_menu)
-        # Remove manual calls to toggle_xxx for settings
-        # self.toggle_mouse_nav(self.mouse_nav_checkbox.checkState())
-        # self.toggle_dominant_color(self.dominant_color_checkbox.checkState())
-        # self.toggle_grayscale(self.grayscale_button.isChecked())
 
         image_layout.addWidget(self.image_label)
         image_widget.setLayout(image_layout)
@@ -196,131 +749,460 @@ class RandomImageViewer(QMainWindow):
         self.history_list.hide()
         central_splitter.addWidget(self.history_list)
         central_splitter.setSizes([900, 100])
-        # Now set visibility
-        self.history_list.setVisible(self.show_history)
+
+        self.status = QStatusBar()
+        self.setStatusBar(self.status)
 
         self.path_label = QLabel()
 
+        self.statusBar().addPermanentWidget(self.path_label)
         self.path_label.linkActivated.connect(self.open_in_explorer)
 
         self.update_image_info()
         self._update_title()
 
-        # Remove from toolbar: self.circle_timer = CircularCountdown(...)
-        # Instead, add as overlay after self.image_label is created
-        self.circle_timer = CircularCountdown(self.timer_interval, self.image_label)
-        self.circle_timer.move(self.image_label.width() - 36, self.image_label.height() - 36)
-        self.circle_timer.hide()
-        self.image_label.resizeEvent = self.overlay_timer_resize_event(self.image_label.resizeEvent)
+    def _setup_main_toolbar(self):
+        toolbar = self.main_toolbar
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self._initial_image_shown and self.images:
-            self.show_random_image()
-            self._initial_image_shown = True
-            self._reset_timer()
+        open_btn = QToolButton()
+        open_btn.setText("📁")
+        open_btn.setToolTip("Open Folder")
+        open_btn.setFixedSize(24, 24)
+        open_btn.clicked.connect(self.choose_folder)
+        toolbar.addWidget(open_btn)
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Left:
-            self.show_previous_image()
-        elif event.key() == Qt.Key_Right:
-            self.show_next_image()
-        elif event.modifiers() & Qt.ControlModifier:
-            if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
-                self.zoom_in()
-            elif event.key() == Qt.Key_Minus:
-                self.zoom_out()
-            elif event.key() == Qt.Key_0:
-                self.reset_zoom()
-            else:
-                super().keyPressEvent(event)
-        else:
-            super().keyPressEvent(event)
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
 
-    def show_previous_image(self):
-        if self.history_index > 0:
-            self.history_index -= 1
-            img_path = self.history[self.history_index]
-            self.flipped_h = False
-            self.flipped_v = False
-            self.display_image(img_path)
-            self.current_image = img_path
-            self.update_image_info(img_path)
-            self.set_status_path(img_path)
-            if self._auto_advance_active:
-                self.timer_remaining = self.timer_interval
-                self._update_ring()
+        # Line drawing tool button
+        self.line_tool_btn = QToolButton()
+        self.line_tool_btn.setText("📏")
+        self.line_tool_btn.setToolTip("Draw Vertical Lines")
+        self.line_tool_btn.setCheckable(True)
+        self.line_tool_btn.setFixedSize(24, 24)
+        self.line_tool_btn.toggled.connect(self.toggle_line_drawing)
+        toolbar.addWidget(self.line_tool_btn)
 
-    def show_next_image(self):
-        if self.history_index < len(self.history) - 1:
-            self.history_index += 1
-            img_path = self.history[self.history_index]
-            self.flipped_h = False
-            self.flipped_v = False
-            self.display_image(img_path)
-            self.current_image = img_path
-            self.update_image_info(img_path)
-            self.set_status_path(img_path)
-            if self._auto_advance_active:
-                self.timer_remaining = self.timer_interval
-                self._update_ring()
-        else:
-            self.show_random_image()
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
 
-    def show_next_or_random_image(self):
-        if self.history_index < len(self.history) - 1:
-            self.show_next_image()
-        else:
-            self.show_random_image()
+        # Horizontal line drawing tool button
+        self.hline_tool_btn = QToolButton()
+        self.hline_tool_btn.setText("━")
+        self.hline_tool_btn.setToolTip("Draw Horizontal Lines")
+        self.hline_tool_btn.setCheckable(True)
+        self.hline_tool_btn.setFixedSize(24, 24)
+        self.hline_tool_btn.toggled.connect(self.toggle_hline_drawing)
+        toolbar.addWidget(self.hline_tool_btn)
 
-    def choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder")
-        if folder:
-            self.folder = folder
-            self.settings.setValue("last_folder", folder)
-            self.images = get_images_in_folder(folder)
-            self.history.clear()
-            self.history_list.clear()
-            self.history_list.repaint()
-            self.current_image = None
-            self.history_index = -1  # Reset history navigation
-            self.flipped_h = False
-            self.flipped_v = False
-            self.update_image_info()
-            self._update_title()
-            if self.images:
-                self.show_random_image()
-            else:
-                self.image_label.setText("No images found in selected folder or its subfolders.")
-            self._reset_timer()
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
 
-    def _update_title(self, img_path=None, info=None):
+        # Free line drawing tool button
+        self.free_line_tool_btn = QToolButton()
+        self.free_line_tool_btn.setText("╱")
+        self.free_line_tool_btn.setToolTip("Draw Free Lines (2 clicks per line)")
+        self.free_line_tool_btn.setCheckable(True)
+        self.free_line_tool_btn.setFixedSize(24, 24)
+        self.free_line_tool_btn.toggled.connect(self.toggle_free_line_drawing)
+        toolbar.addWidget(self.free_line_tool_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Undo last line button
+        self.undo_line_btn = QToolButton()
+        self.undo_line_btn.setText("↶")
+        self.undo_line_btn.setToolTip("Undo Last Line (Remove most recently added line)")
+        self.undo_line_btn.setFixedSize(24, 24)
+        self.undo_line_btn.clicked.connect(self.undo_last_line)
+        toolbar.addWidget(self.undo_line_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Line thickness spinbox
+        self.line_thickness_spin = QSpinBox()
+        self.line_thickness_spin.setRange(1, 10)
+        self.line_thickness_spin.setValue(self.line_thickness)
+        self.line_thickness_spin.setSuffix("px")
+        self.line_thickness_spin.setFixedHeight(24)
+        self.line_thickness_spin.setFixedWidth(50)
+        self.line_thickness_spin.setToolTip("Line Thickness")
+        self.line_thickness_spin.valueChanged.connect(self.update_line_thickness)
+        toolbar.addWidget(self.line_thickness_spin)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Clear lines button
+        clear_lines_btn = QToolButton()
+        clear_lines_btn.setText("🗑")
+        clear_lines_btn.setToolTip("Clear All Lines")
+        clear_lines_btn.setFixedSize(24, 24)
+        clear_lines_btn.clicked.connect(self.clear_lines)
+        toolbar.addWidget(clear_lines_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(8)
+        toolbar.addWidget(spacer)
+
+        # Previous image button (undo image)
+        prev_btn = QToolButton()
+        prev_btn.setText("⬅")
+        prev_btn.setToolTip("Previous Image (Go Back in History)")
+        prev_btn.setFixedSize(24, 24)
+        prev_btn.clicked.connect(self.show_previous_image)
+        toolbar.addWidget(prev_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        next_btn = QToolButton()
+        next_btn.setText("🎲")
+        next_btn.setToolTip("Show Next Random Image")
+        next_btn.setFixedSize(24, 24)
+        next_btn.clicked.connect(self._manual_next_image)
+        toolbar.addWidget(next_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        self.timer_button = QToolButton()
+        self.timer_button.setCheckable(True)
+        self.timer_button.setText("⚡")
+        self.timer_button.setToolTip("Toggle Auto Advance")
+        self.timer_button.setFixedSize(24, 24)
+        self.timer_button.toggled.connect(self.toggle_timer)
+        toolbar.addWidget(self.timer_button)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        self.timer_spin = QSpinBox()
+        self.timer_spin.setRange(1, 3600)
+        self.timer_spin.setValue(self.timer_interval)
+        self.timer_spin.setSuffix(" s")
+        self.timer_spin.setFixedHeight(24)
+        self.timer_spin.setFixedWidth(60)
+        self.timer_spin.valueChanged.connect(self.update_timer_interval)
+        toolbar.addWidget(self.timer_spin)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        self.circle_timer = CircularCountdown(self.timer_spin.value())
+        self.circle_timer.set_parent_viewer(self)
+        toolbar.addWidget(self.circle_timer)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Reset zoom button
+        self.reset_zoom_btn = QToolButton()
+        self.reset_zoom_btn.setText("🔄")
+        self.reset_zoom_btn.setToolTip("Reset Zoom to 100%")
+        self.reset_zoom_btn.setFixedSize(24, 24)
+        self.reset_zoom_btn.clicked.connect(self.reset_zoom)
+        toolbar.addWidget(self.reset_zoom_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Rotate 90 degrees button
+        self.rotate_btn = QToolButton()
+        self.rotate_btn.setText("↻")
+        self.rotate_btn.setToolTip("Rotate Image 90 degrees")
+        self.rotate_btn.setFixedSize(24, 24)
+        self.rotate_btn.clicked.connect(self.rotate_image_90)
+        toolbar.addWidget(self.rotate_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Copy to clipboard button
+        self.copy_btn = QToolButton()
+        self.copy_btn.setText("📋")
+        self.copy_btn.setToolTip("Copy Current Image to Clipboard (with lines and enhancements)")
+        self.copy_btn.setFixedSize(24, 24)
+        self.copy_btn.clicked.connect(self.copy_to_clipboard)
+        toolbar.addWidget(self.copy_btn)
+
+        toolbar.addSeparator()
+
+        # Always on top button
+        self.always_on_top_btn = QToolButton()
+        self.always_on_top_btn.setText("📌")
+        self.always_on_top_btn.setToolTip("Always on Top")
+        self.always_on_top_btn.setCheckable(True)
+        self.always_on_top_btn.setFixedSize(24, 24)
+        self.always_on_top_btn.toggled.connect(self.toggle_always_on_top)
+        toolbar.addWidget(self.always_on_top_btn)
+
+        # Grayscale mode button
+        self.grayscale_btn = QToolButton()
+        self.grayscale_btn.setText("⚪")  # Changed from ⚫ to ⚪ for better visibility on dark background
+        self.grayscale_btn.setToolTip("Toggle Grayscale (Black & White)")
+        self.grayscale_btn.setCheckable(True)
+        self.grayscale_btn.setFixedSize(24, 24)
+        self.grayscale_btn.toggled.connect(self.toggle_grayscale)
+        toolbar.addWidget(self.grayscale_btn)
+
+    def _setup_enhancement_controls(self):
+        """Setup the enhancement controls - put them on main toolbar initially"""
+        # Add a separator before enhancement controls for easy identification
+        self.enhancement_separator = self.main_toolbar.addSeparator()
+        
+        # Create enhancement controls on the main toolbar initially
+        self._create_enhancement_widgets_on_toolbar(self.main_toolbar)
+
+        # History checkbox on main toolbar
+        self.show_history_checkbox = QCheckBox("History")
+        self.show_history_checkbox.setChecked(False)
+        self.show_history_checkbox.setFixedHeight(24)
+        self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
+        self.main_toolbar.addWidget(self.show_history_checkbox)
+
+        # Add stretch to push everything to the left
+        spacer_stretch = QWidget()
+        spacer_stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.main_toolbar.addWidget(spacer_stretch)
+
+    def _update_toolbar_layout(self, width):
+        """Move sliders between main toolbar and second row based on window width"""
+        should_use_two_rows = width < self.width_threshold
+        
+        # Only switch if the mode actually needs to change
+        if should_use_two_rows == self.two_row_mode:
+            return
+        
+        if should_use_two_rows and not self.two_row_mode:
+            print(f"Switching to two-row mode at width {width}")
+            
+            # Store current slider values and history checkbox state
+            gray_val = getattr(self, 'grayscale_slider', None)
+            gray_val = gray_val.value() if gray_val else self.grayscale_value
+            contrast_val = getattr(self, 'contrast_slider', None)
+            contrast_val = contrast_val.value() if contrast_val else self.contrast_value
+            gamma_val = getattr(self, 'gamma_slider', None)
+            gamma_val = gamma_val.value() if gamma_val else self.gamma_value
+            history_checked = getattr(self, 'show_history_checkbox', None)
+            history_checked = history_checked.isChecked() if history_checked else False
+            
+            # Find and remove enhancement widgets from main toolbar
+            actions_to_remove = []
+            found_separator = False
+            
+            for action in self.main_toolbar.actions():
+                if hasattr(self, 'enhancement_separator') and action == self.enhancement_separator:
+                    found_separator = True
+                    actions_to_remove.append(action)
+                elif found_separator:
+                    actions_to_remove.append(action)
+            
+            # Remove the actions
+            for action in actions_to_remove:
+                self.main_toolbar.removeAction(action)
+            
+            # Clear and setup slider toolbar
+            self.slider_toolbar.clear()
+            self._create_enhancement_widgets_on_toolbar(self.slider_toolbar)
+            
+            # Restore slider values
+            if hasattr(self, 'grayscale_slider'):
+                self.grayscale_slider.setValue(gray_val)
+                self.contrast_slider.setValue(contrast_val)
+                self.gamma_slider.setValue(gamma_val)
+            
+            # Add History checkbox to slider toolbar
+            self.show_history_checkbox = QCheckBox("History")
+            self.show_history_checkbox.setChecked(history_checked)
+            self.show_history_checkbox.setFixedHeight(24)
+            self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
+            self.slider_toolbar.addWidget(self.show_history_checkbox)
+            
+            # Show second toolbar and update mode
+            self.slider_toolbar.show()
+            self.two_row_mode = True
+            print("DEBUG: Second toolbar should now be visible")
+            print(f"DEBUG: Slider toolbar visible: {self.slider_toolbar.isVisible()}")
+            print(f"DEBUG: Slider toolbar widget count: {len([self.slider_toolbar.widgetForAction(a) for a in self.slider_toolbar.actions() if self.slider_toolbar.widgetForAction(a)])}")
+            
+            # Force update the UI
+            self.slider_toolbar.update()
+            self.repaint()
+            
+        elif not should_use_two_rows and self.two_row_mode:
+            print(f"Switching to single-row mode at width {width}")
+            
+            # Store current values
+            gray_val = getattr(self, 'grayscale_slider', None)
+            gray_val = gray_val.value() if gray_val else self.grayscale_value
+            contrast_val = getattr(self, 'contrast_slider', None)
+            contrast_val = contrast_val.value() if contrast_val else self.contrast_value
+            gamma_val = getattr(self, 'gamma_slider', None)
+            gamma_val = gamma_val.value() if gamma_val else self.gamma_value
+            history_checked = getattr(self, 'show_history_checkbox', None)
+            history_checked = history_checked.isChecked() if history_checked else False
+            
+            # Clear and hide slider toolbar
+            self.slider_toolbar.clear()
+            self.slider_toolbar.hide()
+            
+            # Re-add enhancement separator to main toolbar
+            self.enhancement_separator = self.main_toolbar.addSeparator()
+            
+            # Add enhancement controls back to main toolbar
+            self._create_enhancement_widgets_on_toolbar(self.main_toolbar)
+            
+            # Restore values
+            if hasattr(self, 'grayscale_slider'):
+                self.grayscale_slider.setValue(gray_val)
+                self.contrast_slider.setValue(contrast_val)
+                self.gamma_slider.setValue(gamma_val)
+            
+            # Add History checkbox back to main toolbar
+            self.show_history_checkbox = QCheckBox("History")
+            self.show_history_checkbox.setChecked(history_checked)
+            self.show_history_checkbox.setFixedHeight(24)
+            self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
+            self.main_toolbar.addWidget(self.show_history_checkbox)
+            
+            # Add stretch to main toolbar
+            spacer_stretch = QWidget()
+            spacer_stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.main_toolbar.addWidget(spacer_stretch)
+            
+            self.two_row_mode = False
+            print("DEBUG: Returned to single-row mode")
+
+    def _create_enhancement_widgets_on_toolbar(self, toolbar):
+        """Create enhancement widgets on the specified toolbar"""
+        # Add some spacing before the enhancement controls
+        spacer_start = QWidget()
+        spacer_start.setFixedWidth(8)
+        toolbar.addWidget(spacer_start)
+        
+        # Grayscale slider
+        gray_label = QLabel("Gray:")
+        gray_label.setFixedWidth(30)
+        gray_label.setStyleSheet("font-size: 9px; margin-right: 2px;")
+        toolbar.addWidget(gray_label)
+        
+        self.grayscale_slider = ClickableSlider(Qt.Horizontal)
+        self.grayscale_slider.setRange(0, 100)
+        self.grayscale_slider.setValue(self.grayscale_value)
+        self.grayscale_slider.setFixedWidth(70)  # Increased width for easier clicking
+        self.grayscale_slider.setFixedHeight(24)  # Increased height for easier clicking
+        self.grayscale_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
+        self.grayscale_slider.setToolTip("Grayscale: 0=Color, 100=B&W")
+        self.grayscale_slider.valueChanged.connect(self.update_grayscale)
+        toolbar.addWidget(self.grayscale_slider)
+
+        # Small spacer between sliders
+        spacer1 = QWidget()
+        spacer1.setFixedWidth(4)
+        toolbar.addWidget(spacer1)
+
+        # Contrast slider
+        contrast_label = QLabel("Con:")
+        contrast_label.setFixedWidth(25)
+        contrast_label.setStyleSheet("font-size: 9px; margin-right: 2px;")
+        toolbar.addWidget(contrast_label)
+        
+        self.contrast_slider = ClickableSlider(Qt.Horizontal)
+        self.contrast_slider.setRange(0, 200)
+        self.contrast_slider.setValue(self.contrast_value)
+        self.contrast_slider.setFixedWidth(70)  # Increased width for easier clicking
+        self.contrast_slider.setFixedHeight(24)  # Increased height for easier clicking
+        self.contrast_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
+        self.contrast_slider.setToolTip("Contrast: 50=Normal, 0=Flat, 200=Extreme")
+        self.contrast_slider.valueChanged.connect(self.update_contrast)
+        toolbar.addWidget(self.contrast_slider)
+
+        # Small spacer between sliders
+        spacer2 = QWidget()
+        spacer2.setFixedWidth(4)
+        toolbar.addWidget(spacer2)
+
+        # Gamma slider
+        gamma_label = QLabel("Gam:")
+        gamma_label.setFixedWidth(25)
+        gamma_label.setStyleSheet("font-size: 9px; margin-right: 2px;")
+        toolbar.addWidget(gamma_label)
+        
+        self.gamma_slider = ClickableSlider(Qt.Horizontal)
+        self.gamma_slider.setRange(0, 200)
+        self.gamma_slider.setValue(self.gamma_value)
+        self.gamma_slider.setFixedWidth(70)  # Increased width for easier clicking
+        self.gamma_slider.setFixedHeight(24)  # Increased height for easier clicking
+        self.gamma_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
+        self.gamma_slider.setToolTip("Gamma: 50=Normal, 0=Very Dark, 200=Very Bright")
+        self.gamma_slider.valueChanged.connect(self.update_gamma)
+        toolbar.addWidget(self.gamma_slider)
+
+        # Small spacer before reset button
+        spacer3 = QWidget()
+        spacer3.setFixedWidth(6)
+        toolbar.addWidget(spacer3)
+
+        # Reset button
+        reset_btn = QToolButton()
+        reset_btn.setText("↺")
+        reset_btn.setToolTip("Reset Enhancements")
+        reset_btn.setFixedSize(20, 24)  # Slightly larger for easier clicking
+        reset_btn.setStyleSheet("QToolButton { margin: 2px; }")  # Add margin around button
+        reset_btn.clicked.connect(self.reset_enhancements)
+        toolbar.addWidget(reset_btn)
+
+    def _update_title(self):
         count = len(self.images)
         folder_name = os.path.basename(self.folder) if self.folder else ""
-        if img_path and info:
-            base = os.path.basename(img_path)
-            self.setWindowTitle(f"Random Image Viewer - {base} ({info}) - {img_path}")
-        else:
-            self.setWindowTitle(f"Random Image Viewer - {folder_name} ({count} images found)")
+        self.setWindowTitle(f"Random Image Viewer - {folder_name} ({count} images found)")
 
     def update_image_info(self, img_path=None):
         if img_path is None or not os.path.exists(img_path):
-            self._update_title()
+            self.status.showMessage("")
             return
         base = os.path.basename(img_path)
-        pixmap = QPixmap(img_path)
-        if not pixmap.isNull():
-            info = f"{pixmap.width()}x{pixmap.height()}"
+        
+        # Use safe loading for image info
+        pixmap, error = safe_load_pixmap(img_path)
+        if error:
+            info = f"{base} - {error}"
+        elif not pixmap.isNull():
+            file_size_mb = get_image_file_size(img_path)
+            if file_size_mb > 10:  # Show file size for large files
+                info = f"{base} – {pixmap.width()}x{pixmap.height()} ({file_size_mb:.1f} MB)"
+            else:
+                info = f"{base} – {pixmap.width()}x{pixmap.height()}"
         else:
             info = base
-        # Update title with image info
-        self._update_title(img_path, info)
+        self.status.showMessage(info)
 
     def show_random_image(self):
         if not self.images:
             return
-        self.flipped_h = False
-        self.flipped_v = False
+        # Clear lines when showing a new random image
+        self.drawn_lines.clear()
+        self.drawn_horizontal_lines.clear()
+        self.drawn_free_lines.clear()
+        self.current_line_start = None
+        # Reset rotation angle for new image
+        self.rotation_angle = 0
         available = [img for img in self.images if img not in self.history]
         if not available:
             self.history.clear()
@@ -333,53 +1215,438 @@ class RandomImageViewer(QMainWindow):
         self.update_image_info(img_path)
         self.set_status_path(img_path)
         if self._auto_advance_active:
-            self.timer_remaining = self.timer_interval
+            self.timer_remaining = self.timer_spin.value()
             self._update_ring()
 
     def _manual_next_image(self):
         self.show_random_image()
 
     def display_image(self, img_path):
-        pixmap = QPixmap(img_path)
-        if pixmap.isNull():
-            self.image_label.setText("Cannot load image.")
-            return
-        # Apply transformations
-        image = pixmap.toImage()
-        if self.settings.value("grayscale_enabled", False, type=bool):
-            image = image.convertToFormat(QImage.Format_Grayscale8)
-        if self.flipped_h:
-            transform = QTransform().scale(-1, 1)
-            image = image.transformed(transform)
-        if self.flipped_v:
-            transform = QTransform().scale(1, -1)
-            image = image.transformed(transform)
-        pixmap = QPixmap.fromImage(image)
-        size = self.image_label.size() * self.zoom_factor  # NEW: scale by zoom
-        scaled = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled)
+        # Create cache key including enhancement settings and rotation
+        cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}"
+        
+        # Check enhanced cache first
+        if cache_key in self.enhancement_cache:
+            pixmap = self.enhancement_cache[cache_key]
+        else:
+            # Check base pixmap cache
+            if img_path in self.pixmap_cache:
+                base_pixmap = self.pixmap_cache[img_path]
+            else:
+                base_pixmap, error = safe_load_pixmap(img_path)
+                if error:
+                    self.image_label.setText(error)
+                    self.status.showMessage(os.path.basename(img_path))
+                    return
+                
+                # Cache the base pixmap
+                self._manage_cache(self.pixmap_cache, img_path, base_pixmap)
+            
+            # Apply enhancements only if needed
+            if self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 50:
+                pixmap = self.apply_fast_enhancements(base_pixmap.copy())
+            else:
+                pixmap = base_pixmap
+            
+            # Apply rotation if needed
+            if self.rotation_angle != 0:
+                # Use QTransform for rotation
+                transform = QTransform()
+                transform.rotate(self.rotation_angle)
+                rotated_image = pixmap.toImage().transformed(transform)
+                pixmap = QPixmap.fromImage(rotated_image)
+            
+            # Cache the enhanced and rotated version
+            self._manage_cache(self.enhancement_cache, cache_key, pixmap)
+        
+        # Cache the original for line drawing reference
+        self.original_pixmap = pixmap.copy()
+        
+        # Scale FIRST, then draw lines on the scaled version
+        scaled_pixmap = self._scale_pixmap(pixmap, img_path)
+        
+        # Draw lines on the scaled pixmap if any exist
+        if self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines:
+            final_pixmap = scaled_pixmap.copy()
+            painter = QPainter(final_pixmap)
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            
+            # Use white color and user-selected thickness
+            pen_color = QColor("#ffffff")
+            pen_thickness = self.line_thickness
+            painter.setPen(QPen(pen_color, pen_thickness, Qt.SolidLine))
+            
+            # Get the transformation parameters for line drawing
+            original_size = self.original_pixmap.size()
+            label_size = self.image_label.size()
+            zoom_factor = self.image_label.zoom_factor
+            
+            # UNIFIED coordinate calculation - use the same logic for ALL zoom levels
+            # Calculate the base scaled size that would be used at 100% zoom
+            base_scaled = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            
+            # Apply zoom factor to get the actual displayed size
+            zoomed_width = int(base_scaled.width() * zoom_factor)
+            zoomed_height = int(base_scaled.height() * zoom_factor)
+            
+            # Calculate position within the final pixmap (including pan offset)
+            draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+            draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+            
+            # Scale factors from original to zoomed display (works for all zoom levels)
+            scale_x = zoomed_width / original_size.width()
+            scale_y = zoomed_height / original_size.height()
+            
+            # Handle rotation for line drawing
+            if self.rotation_angle != 0:
+                # Get the rotated image dimensions for proper line transformation
+                # For rotation, we need to work with the original unrotated coordinates
+                # and then transform them according to the rotation
+                
+                # Draw vertical lines (adjusted for rotation)
+                for x in self.drawn_lines:
+                    if self.rotation_angle == 90:
+                        # Vertical line in original becomes horizontal in rotated display
+                        # x coordinate in original becomes y coordinate in rotated display
+                        transformed_y = x * scale_y
+                        display_y = int(transformed_y) + draw_y
+                        if 0 <= display_y < final_pixmap.height():
+                            painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                    elif self.rotation_angle == 180:
+                        # Vertical line stays vertical but mirrored
+                        transformed_x = (original_size.width() - x) * scale_x
+                        display_x = int(transformed_x) + draw_x
+                        if 0 <= display_x < final_pixmap.width():
+                            painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                    elif self.rotation_angle == 270:
+                        # Vertical line in original becomes horizontal in rotated display  
+                        # x coordinate in original becomes (height - y) coordinate in rotated display
+                        transformed_y = (original_size.height() - x) * scale_y
+                        display_y = int(transformed_y) + draw_y
+                        if 0 <= display_y < final_pixmap.height():
+                            painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                    else:
+                        # For other angles, draw as vertical (fallback)
+                        display_x = int(x * scale_x) + draw_x
+                        if 0 <= display_x < final_pixmap.width():
+                            painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                
+                # Draw horizontal lines (adjusted for rotation)
+                for y in self.drawn_horizontal_lines:
+                    if self.rotation_angle == 90:
+                        # Horizontal line in original becomes vertical in rotated display
+                        # y coordinate in original becomes (width - x) coordinate in rotated display  
+                        transformed_x = (original_size.width() - y) * scale_x
+                        display_x = int(transformed_x) + draw_x
+                        if 0 <= display_x < final_pixmap.width():
+                            painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                    elif self.rotation_angle == 180:
+                        # Horizontal line stays horizontal but mirrored
+                        transformed_y = (original_size.height() - y) * scale_y
+                        display_y = int(transformed_y) + draw_y
+                        if 0 <= display_y < final_pixmap.height():
+                            painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                    elif self.rotation_angle == 270:
+                        # Horizontal line in original becomes vertical in rotated display
+                        # y coordinate in original becomes x coordinate in rotated display
+                        transformed_x = y * scale_x
+                        display_x = int(transformed_x) + draw_x
+                        if 0 <= display_x < final_pixmap.width():
+                            painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                    else:
+                        # For other angles, draw as horizontal (fallback)
+                        display_y = int(y * scale_y) + draw_y
+                        if 0 <= display_y < final_pixmap.height():
+                            painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                
+                # Draw free lines (adjusted for rotation)
+                for line in self.drawn_free_lines:
+                    start_x, start_y = line['start']
+                    end_x, end_y = line['end']
+                    
+                    # Transform coordinates based on rotation
+                    # Follow the EXACT transformation used by vertical/horizontal lines:
+                    if self.rotation_angle == 90:
+                        # 90° rotation transformations:
+                        # Vertical line: x → y (so start_x → start_y coordinate)
+                        # Horizontal line: y → (width - y) (so start_y → (width - start_y) coordinate)
+                        display_start_x = int((original_size.width() - start_y) * scale_x) + draw_x
+                        display_start_y = int(start_x * scale_y) + draw_y
+                        display_end_x = int((original_size.width() - end_y) * scale_x) + draw_x
+                        display_end_y = int(end_x * scale_y) + draw_y
+                    elif self.rotation_angle == 180:
+                        # 180° rotation: both coordinates are flipped
+                        display_start_x = int((original_size.width() - start_x) * scale_x) + draw_x
+                        display_start_y = int((original_size.height() - start_y) * scale_y) + draw_y
+                        display_end_x = int((original_size.width() - end_x) * scale_x) + draw_x
+                        display_end_y = int((original_size.height() - end_y) * scale_y) + draw_y
+                    elif self.rotation_angle == 270:
+                        # 270° rotation transformations:
+                        # Vertical line: x → (height - x) (so start_x → (height - start_x) coordinate)
+                        # Horizontal line: y → y (so start_y → start_y coordinate)
+                        display_start_x = int(start_y * scale_x) + draw_x
+                        display_start_y = int((original_size.height() - start_x) * scale_y) + draw_y
+                        display_end_x = int(end_y * scale_x) + draw_x
+                        display_end_y = int((original_size.height() - end_x) * scale_y) + draw_y
+                    else:
+                        # Fallback for other angles
+                        display_start_x = int(start_x * scale_x) + draw_x
+                        display_start_y = int(start_y * scale_y) + draw_y
+                        display_end_x = int(end_x * scale_x) + draw_x
+                        display_end_y = int(end_y * scale_y) + draw_y
+                    
+                    # Draw the line with more lenient bounds checking
+                    # Allow lines to be drawn if any part might be visible (let QPainter handle clipping)
+                    # Add some tolerance to prevent precision issues from hiding lines
+                    tolerance = 10  # pixels
+                    
+                    # Check if the line potentially intersects the visible area
+                    min_x = min(display_start_x, display_end_x)
+                    max_x = max(display_start_x, display_end_x)
+                    min_y = min(display_start_y, display_end_y)
+                    max_y = max(display_start_y, display_end_y)
+                    
+                    # Draw if the line's bounding box intersects the pixmap (with tolerance)
+                    if (max_x >= -tolerance and min_x <= final_pixmap.width() + tolerance and
+                        max_y >= -tolerance and min_y <= final_pixmap.height() + tolerance):
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+            else:
+                # No rotation - original line drawing logic
+                # Draw vertical lines
+                for x in self.drawn_lines:
+                    display_x = int(x * scale_x) + draw_x
+                    if 0 <= display_x < final_pixmap.width():
+                        painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                
+                # Draw horizontal lines
+                for y in self.drawn_horizontal_lines:
+                    display_y = int(y * scale_y) + draw_y
+                    if 0 <= display_y < final_pixmap.height():
+                        painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                
+                # Draw free lines (two-point lines)
+                for line in self.drawn_free_lines:
+                    start_x, start_y = line['start']
+                    end_x, end_y = line['end']
+                    
+                    # No rotation - use original coordinates directly
+                    display_start_x = int(start_x * scale_x) + draw_x
+                    display_start_y = int(start_y * scale_y) + draw_y
+                    display_end_x = int(end_x * scale_x) + draw_x
+                    display_end_y = int(end_y * scale_y) + draw_y
+                    
+                    # Draw the line with more lenient bounds checking
+                    # Allow lines to be drawn if any part might be visible (let QPainter handle clipping)
+                    # Add some tolerance to prevent precision issues from hiding lines
+                    tolerance = 10  # pixels
+                    
+                    # Check if the line potentially intersects the visible area
+                    min_x = min(display_start_x, display_end_x)
+                    max_x = max(display_start_x, display_end_x)
+                    min_y = min(display_start_y, display_end_y)
+                    max_y = max(display_start_y, display_end_y)
+                    
+                    # Draw if the line's bounding box intersects the pixmap (with tolerance)
+                    if (max_x >= -tolerance and min_x <= final_pixmap.width() + tolerance and
+                        max_y >= -tolerance and min_y <= final_pixmap.height() + tolerance):
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+            
+            painter.end()
+            scaled_pixmap = final_pixmap
+        
+        # Display the final scaled pixmap
+        self.image_label.setPixmap(scaled_pixmap)
         self.image_label.setToolTip("")
         self.current_image = img_path
-        # Set background according to dropdown
-        mode = self.settings.value("bg_mode", "Black")
-        if mode == "Adaptive Color":
-            self.set_adaptive_bg(img_path)
-        elif mode == "Gray":
-            self.image_label.parentWidget().setStyleSheet("background-color: #444444;")
-        else:
-            self.image_label.parentWidget().setStyleSheet("background-color: #000000;")
-        # Update title with image info
-        pixmap = QPixmap(img_path)
-        if not pixmap.isNull():
-            info = f"{pixmap.width()}x{pixmap.height()}"
-        else:
-            info = os.path.basename(img_path)
-        self._update_title(img_path, info)
+
+    def _scale_pixmap(self, pixmap, img_path):
+        """Scale pixmap for display with zoom and pan support"""
+        size = self.image_label.size()
+        zoom_factor = self.image_label.zoom_factor
+        pan_x = self.image_label.pan_offset_x
+        pan_y = self.image_label.pan_offset_y
+        
+        # Create cache key including zoom and pan for proper caching
+        scale_key = f"{img_path}_{size.width()}_{size.height()}_{zoom_factor}_{pan_x}_{pan_y}"
+        
+        # UNIFIED coordinate system for ALL zoom levels - no special case for 1.0
+        # Always calculate the base scaled size first
+        base_scaled = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        
+        # Apply zoom factor to get the final zoomed size
+        zoomed_width = int(base_scaled.width() * zoom_factor)
+        zoomed_height = int(base_scaled.height() * zoom_factor)
+        zoomed_size = QSize(zoomed_width, zoomed_height)
+        
+        # Scale the original pixmap to the zoomed size
+        zoomed_pixmap = pixmap.scaled(zoomed_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        
+        # Create a pixmap the size of the label
+        final_pixmap = QPixmap(size)
+        final_pixmap.fill(Qt.black)  # Fill with black background
+        
+        # Calculate the position to draw the zoomed image
+        # Center the zoomed image in the label, then apply pan offset
+        draw_x = (size.width() - zoomed_width) // 2 + int(pan_x)
+        draw_y = (size.height() - zoomed_height) // 2 + int(pan_y)
+        
+        # Draw the zoomed image onto the final pixmap
+        painter = QPainter(final_pixmap)
+        painter.drawPixmap(draw_x, draw_y, zoomed_pixmap)
+        painter.end()
+        
+        scaled = final_pixmap
+        
+        self.last_size = size
+        return scaled
+
+    def _manage_cache(self, cache_dict, key, value):
+        """Manage cache size with LRU-like behavior"""
+        if len(cache_dict) >= self.max_cache_size:
+            # Remove oldest entries
+            keys_to_remove = list(cache_dict.keys())[:-self.max_cache_size//2]
+            for k in keys_to_remove:
+                del cache_dict[k]
+            # Force garbage collection periodically
+            if len(cache_dict) % 10 == 0:
+                gc.collect()
+        cache_dict[key] = value
+
+    def apply_fast_enhancements(self, pixmap):
+        """Apply fast image enhancements using Qt's optimized color effects."""
+        if not pixmap or pixmap.isNull():
+            return pixmap
+            
+        # Fast grayscale conversion using Qt's built-in weighted average
+        if self.grayscale_value > 0:
+            # Create a grayscale version using Qt's optimized conversion
+            image = pixmap.toImage()
+            gray_image = image.convertToFormat(image.Format.Format_Grayscale8)
+            gray_pixmap = QPixmap.fromImage(gray_image)
+            
+            if self.grayscale_value == 100:
+                pixmap = gray_pixmap
+            else:
+                # Fast blend using Qt's composition modes
+                result = QPixmap(pixmap.size())
+                result.fill(Qt.transparent)
+                
+                painter = QPainter(result)
+                painter.setRenderHint(QPainter.Antialiasing)
+                
+                # Draw original image
+                painter.setOpacity(1.0 - (self.grayscale_value / 100.0))
+                painter.drawPixmap(0, 0, pixmap)
+                
+                # Draw grayscale overlay
+                painter.setOpacity(self.grayscale_value / 100.0)
+                painter.drawPixmap(0, 0, gray_pixmap)
+                
+                painter.end()
+                pixmap = result
+        
+        # Apply contrast and gamma using fast QPainter effects instead of pixel manipulation
+        if self.contrast_value != 50 or self.gamma_value != 50:
+            # Create enhanced version using QPainter composition
+            enhanced = QPixmap(pixmap.size())
+            enhanced.fill(Qt.transparent)
+            
+            painter = QPainter(enhanced)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Fast contrast approximation using opacity and blend modes
+            if self.contrast_value != 50:
+                # Extended range: 0-200, where 50 is normal
+                contrast_factor = (self.contrast_value - 50) / 50.0  # -1 to 3
+                
+                if contrast_factor > 0:
+                    # Increase contrast by overlay blending (can now go to extreme levels)
+                    painter.drawPixmap(0, 0, pixmap)
+                    painter.setCompositionMode(QPainter.CompositionMode_Overlay)
+                    # Scale the effect for the extended range
+                    opacity = min(1.0, contrast_factor * 0.7)  # Allow stronger effects
+                    painter.setOpacity(opacity)
+                    painter.drawPixmap(0, 0, pixmap)
+                    
+                    # For extreme contrast (>100), add additional overlay passes
+                    if self.contrast_value > 100:
+                        extra_passes = int((self.contrast_value - 100) / 50)
+                        for _ in range(min(extra_passes, 2)):  # Limit to 2 extra passes
+                            painter.setOpacity(0.3)
+                            painter.drawPixmap(0, 0, pixmap)
+                else:
+                    # Decrease contrast by soft light blending
+                    mid_gray = QPixmap(pixmap.size())
+                    mid_gray.fill(QColor(128, 128, 128))  # 50% gray
+                    
+                    painter.drawPixmap(0, 0, pixmap)
+                    painter.setCompositionMode(QPainter.CompositionMode_SoftLight)
+                    # Scale for extended low range
+                    opacity = min(1.0, abs(contrast_factor) * 0.6)
+                    painter.setOpacity(opacity)
+                    painter.drawPixmap(0, 0, mid_gray)
+            else:
+                painter.drawPixmap(0, 0, pixmap)
+            
+            # Fast gamma approximation using multiply blend
+            if self.gamma_value != 50:
+                # Extended range: 0-200, where 50 is normal  
+                gamma_factor = (self.gamma_value - 50) / 50.0  # -1 to 3
+                
+                if gamma_factor > 0:
+                    # Brighten (simulate lower gamma) - can now go to extreme brightness
+                    painter.setCompositionMode(QPainter.CompositionMode_Screen)
+                    opacity = min(1.0, gamma_factor * 0.5)  # Allow stronger brightening
+                    painter.setOpacity(opacity)
+                    painter.drawPixmap(0, 0, pixmap)
+                    
+                    # For extreme gamma (>100), add additional screen passes
+                    if self.gamma_value > 100:
+                        extra_passes = int((self.gamma_value - 100) / 50)
+                        for _ in range(min(extra_passes, 2)):  # Limit to 2 extra passes
+                            painter.setOpacity(0.4)
+                            painter.drawPixmap(0, 0, pixmap)
+                else:
+                    # Darken (simulate higher gamma) - can now go to extreme darkness
+                    painter.setCompositionMode(QPainter.CompositionMode_Multiply)
+                    opacity = min(1.0, abs(gamma_factor) * 0.6)  # Allow stronger darkening
+                    painter.setOpacity(opacity)
+                    painter.drawPixmap(0, 0, pixmap)
+                    
+                    # For extreme low gamma (<25), add additional multiply passes
+                    if self.gamma_value < 25:
+                        extra_passes = int((25 - self.gamma_value) / 12)
+                        for _ in range(min(extra_passes, 2)):  # Limit to 2 extra passes
+                            painter.setOpacity(0.7)
+                            painter.drawPixmap(0, 0, pixmap)
+            
+            painter.end()
+            pixmap = enhanced
+        
+        return pixmap
 
     def resizeEvent(self, event):
+        # Simple debounced resize handling
+        self.resize_timer.start(100)  # 100ms debounce
+        super().resizeEvent(event)
+        
+    def _delayed_resize(self):
+        """Handle resize events with a delay to improve performance"""
+        # Check if we need to move sliders to second row
+        current_width = self.width()
+        should_use_two_rows = current_width < self.width_threshold
+        
+        # Only switch if the mode actually needs to change AND we have minimal hysteresis
+        if should_use_two_rows != self.two_row_mode:
+            # Reduced hysteresis to prevent rapid switching
+            if should_use_two_rows and current_width < (self.width_threshold - 10):
+                self._update_toolbar_layout(current_width)
+            elif not should_use_two_rows and current_width > (self.width_threshold + 10):
+                self._update_toolbar_layout(current_width)
+        
+        # Handle image display resize
         if self.current_image:
             self.display_image(self.current_image)
-        super().resizeEvent(event)
 
     def add_to_history(self, img_path):
         # If we've navigated back in history and now show a new random image,
@@ -397,14 +1664,30 @@ class RandomImageViewer(QMainWindow):
 
     def _add_history_item(self, img_path):
         item = QListWidgetItem(os.path.basename(img_path))
-        thumb = QPixmap(img_path)
-        if not thumb.isNull():
-            thumb = thumb.scaled(QSize(40, 40), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            item.setIcon(thumb)
+        
+        # Only create thumbnails if history panel is visible to improve performance
+        if self.show_history_checkbox.isChecked() and self.history_list.isVisible():
+            try:
+                # Use faster thumbnail loading for large collections
+                reader = QImageReader(img_path)
+                if reader.canRead():
+                    # Scale down during read for much faster thumbnail creation
+                    reader.setScaledSize(QSize(40, 40))
+                    thumb_image = reader.read()
+                    if not thumb_image.isNull():
+                        thumb = QPixmap.fromImage(thumb_image)
+                        item.setIcon(thumb)
+            except Exception:
+                # Skip thumbnail on error to avoid slowdown
+                pass
+        
         item.setToolTip(img_path)
         item.setData(Qt.UserRole, img_path)
         self.history_list.addItem(item)
-        self.history_list.scrollToBottom()
+        
+        # Only scroll to bottom if history panel is visible
+        if self.show_history_checkbox.isChecked() and self.history_list.isVisible():
+            self.history_list.scrollToBottom()
 
     def on_history_clicked(self, item):
         img_path = item.data(Qt.UserRole)
@@ -420,61 +1703,22 @@ class RandomImageViewer(QMainWindow):
             self.update_image_info(img_path)
             self.set_status_path(img_path)
             if self._auto_advance_active:
-                self.timer_remaining = self.timer_interval
+                self.timer_remaining = self.timer_spin.value()
                 self._update_ring()
 
     def toggle_history_panel(self, checked):
         self.history_list.setVisible(bool(checked))
-        self.settings.setValue("show_history_panel", bool(checked))
+
+    def update_timer_interval(self, value):
+        self.timer_interval = value
+        self.circle_timer.set_total_time(value)
+        if self._auto_advance_active:
+            self.timer_remaining = value
+            self._update_ring()
 
     def toggle_timer(self, checked):
         self._auto_advance_active = bool(checked)
-        self.settings.setValue("auto_advance_enabled", self._auto_advance_active)
         self._reset_timer()
-
-    def change_bg_mode(self, mode):
-        self.settings.setValue("bg_mode", mode)
-        self.display_image(self.current_image) if self.current_image else None
-
-    def toggle_grayscale(self, checked):
-        self.settings.setValue("grayscale_enabled", checked)
-        if checked:
-            self.image_label.parentWidget().setStyleSheet("background-color: #3b7dd8; color: #fff; border-radius: 4px;")
-        else:
-            self.image_label.parentWidget().setStyleSheet("")
-        self.display_image(self.current_image) if self.current_image else None
-
-    def flip_horizontal(self):
-        self.flipped_h = not self.flipped_h
-        self.display_image(self.current_image) if self.current_image else None
-
-    def flip_vertical(self):
-        self.flipped_v = not self.flipped_v
-        self.display_image(self.current_image) if self.current_image else None
-
-    def set_adaptive_bg(self, img_path):
-        try:
-            pixmap = QPixmap(img_path)
-            if pixmap.isNull():
-                return
-            image = pixmap.toImage()
-            w, h = image.width(), image.height()
-            # Downsample for speed
-            step = max(1, min(w, h) // 64)
-            colors = {}
-            for x in range(0, w, step):
-                for y in range(0, h, step):
-                    c = QColor(image.pixel(x, y)).rgb() & 0xFFFFFF
-                    colors[c] = colors.get(c, 0) + 1
-            if not colors:
-                return
-            dom_rgb = max(colors, key=colors.get)
-            r = (dom_rgb >> 16) & 0xFF
-            g = (dom_rgb >> 8) & 0xFF
-            b = dom_rgb & 0xFF
-            self.image_label.parentWidget().setStyleSheet(f"background-color: rgb({r},{g},{b});")
-        except Exception:
-            pass
 
     def set_status_path(self, image_path):
         # For Windows, convert slashes and prepend file:///
@@ -501,170 +1745,346 @@ class RandomImageViewer(QMainWindow):
         else:  # linux
             subprocess.Popen(["xdg-open", folder])
 
-    def overlay_timer_resize_event(self, original_resize_event):
-        def new_resize_event(event):
-            # Call the original resize event
-            if original_resize_event:
-                original_resize_event(event)
-            # Move the timer to bottom-right
-            self.circle_timer.move(self.image_label.width() - 36, self.image_label.height() - 36)
-        return new_resize_event
-
     def _reset_timer(self):
         if self._auto_advance_active and self.images:
             self.timer.stop()
-            self.timer_remaining = self.timer_interval
+            self.timer_remaining = self.timer_spin.value()
+            self.circle_timer.set_total_time(self.timer_spin.value())
             self._update_ring()
             self.timer.start()
-            self.circle_timer.show()
         else:
             self.timer.stop()
             self.circle_timer.set_remaining_time(0)
-            self.circle_timer.hide()
 
     def _on_timer_tick(self):
         if not self._auto_advance_active or not self.images:
             self.timer.stop()
             self.circle_timer.set_remaining_time(0)
             return
-        self.timer_remaining -= 1
-        if self.timer_remaining <= 0:
-            self.show_random_image()
+        
+        # Don't decrease timer if paused
+        if not self._timer_paused:
+            self.timer_remaining -= 1
+            if self.timer_remaining <= 0:
+                self.show_random_image()
+            else:
+                self._update_ring()
+        # If paused, just update the ring display
         else:
             self._update_ring()
 
+    def toggle_timer_pause(self):
+        """Toggle pause/resume state of the timer when it's active"""
+        if self._auto_advance_active:
+            self._timer_paused = not self._timer_paused
+            self.circle_timer.set_paused(self._timer_paused)
+            
+            # Update tooltip to show current state
+            if self._timer_paused:
+                self.circle_timer.setToolTip("Timer Paused - Click to Resume")
+            else:
+                self.circle_timer.setToolTip("Timer Running - Click to Pause")
+
     def _update_ring(self):
-        self.circle_timer.set_total_time(self.timer_interval)
+        self.circle_timer.set_total_time(self.timer_spin.value())
         self.circle_timer.set_remaining_time(self.timer_remaining)
 
-    def show_context_menu(self, pos):
-        menu = QMenu(self)
-        # --- Main actions ---
-        open_action = QAction("Open Folder", self)
-        open_action.triggered.connect(self.choose_folder)
-        menu.addAction(open_action)
-        menu.addSeparator()
-        prev_action = QAction("Previous Image", self)
-        prev_action.triggered.connect(self.show_previous_image)
-        menu.addAction(prev_action)
-        next_action = QAction("Next Random Image", self)
-        next_action.triggered.connect(self.show_next_or_random_image)
-        menu.addAction(next_action)
-        open_explorer_action = QAction("Open in Explorer", self)
-        open_explorer_action.triggered.connect(self.open_current_in_explorer)
-        menu.addAction(open_explorer_action)
-        menu.addSeparator()
-        # --- Zoom actions ---
-        zoom_in_action = QAction("Zoom In", self)
-        zoom_in_action.setShortcut("Ctrl++")
-        zoom_in_action.triggered.connect(self.zoom_in)
-        menu.addAction(zoom_in_action)
-        zoom_out_action = QAction("Zoom Out", self)
-        zoom_out_action.setShortcut("Ctrl+-")
-        zoom_out_action.triggered.connect(self.zoom_out)
-        menu.addAction(zoom_out_action)
-        reset_zoom_action = QAction("Reset Zoom", self)
-        reset_zoom_action.setShortcut("Ctrl+0")
-        reset_zoom_action.triggered.connect(self.reset_zoom)
-        menu.addAction(reset_zoom_action)
-        menu.addSeparator()
-        # --- Timer ---
-        timer_action = QAction("Enable Timer", self)
-        timer_action.setCheckable(True)
-        timer_action.setChecked(self._auto_advance_active)
-        timer_action.toggled.connect(self.toggle_timer)
-        menu.addAction(timer_action)
-        # Timer interval submenu
-        timer_menu = QMenu("Timer Interval", self)
-        for label, value in [("30s", 30), ("60s", 60), ("5m", 300), ("10m", 600)]:
-            act = QAction(label, self)
-            act.setCheckable(True)
-            act.setChecked(self.timer_interval == value)
-            act.triggered.connect(lambda checked, v=value: self.set_timer_interval(v))
-            timer_menu.addAction(act)
-        custom_act = QAction("Custom...", self)
-        custom_act.triggered.connect(self.set_custom_timer_interval)
-        timer_menu.addAction(custom_act)
-        menu.addMenu(timer_menu)
-        menu.addSeparator()
-        # --- Settings ---
-        grayscale_action = QAction("Grayscale", self)
-        grayscale_action.setCheckable(True)
-        grayscale_action.setChecked(self.settings.value("grayscale_enabled", False, type=bool))
-        grayscale_action.toggled.connect(self.toggle_grayscale)
-        menu.addAction(grayscale_action)
-        flip_h_action = QAction("Flip Horizontal", self)
-        flip_h_action.triggered.connect(self.flip_horizontal)
-        menu.addAction(flip_h_action)
-        flip_v_action = QAction("Flip Vertical", self)
-        flip_v_action.triggered.connect(self.flip_vertical)
-        menu.addAction(flip_v_action)
-        history_action = QAction("Show History Panel", self)
-        history_action.setCheckable(True)
-        history_action.setChecked(self.settings.value("show_history_panel", False, type=bool))
-        history_action.toggled.connect(self.toggle_history_panel)
-        menu.addAction(history_action)
-        # Background color submenu
-        bg_menu = QMenu("Background Color", self)
-        current_bg = self.settings.value("bg_mode", "Black")
-        for mode in ["Black", "Gray", "Adaptive Color"]:
-            act = QAction(mode, self)
-            act.setCheckable(True)
-            act.setChecked(current_bg == mode)
-            act.triggered.connect(lambda checked, m=mode: self.change_bg_mode(m))
-            bg_menu.addAction(act)
-        menu.addMenu(bg_menu)
-        menu.exec(self.image_label.mapToGlobal(pos))
+    def toggle_line_drawing(self, checked):
+        self.line_drawing_mode = checked
+        if checked:
+            # Disable other line modes when this one is activated
+            self.horizontal_line_drawing_mode = False
+            self.free_line_drawing_mode = False
+            self.current_line_start = None
+            self.hline_tool_btn.setChecked(False)
+            self.free_line_tool_btn.setChecked(False)
+        # Don't clear lines when mode is deactivated - keep them visible
+        self._update_cursor_and_status()
 
-    def set_timer_interval(self, value):
-        self.timer_interval = value
-        self.settings.setValue("timer_interval", value)
-        self.timer_remaining = value
-        self._update_ring()
+    def toggle_hline_drawing(self, checked):
+        self.horizontal_line_drawing_mode = checked
+        if checked:
+            # Disable other line modes when this one is activated
+            self.line_drawing_mode = False
+            self.free_line_drawing_mode = False
+            self.current_line_start = None
+            self.line_tool_btn.setChecked(False)
+            self.free_line_tool_btn.setChecked(False)
+        # Don't clear lines when mode is deactivated - keep them visible
+        self._update_cursor_and_status()
 
-    def set_custom_timer_interval(self):
-        val, ok = QInputDialog.getInt(self, "Custom Timer Interval", "Seconds:", self.timer_interval, 1, 3600)
-        if ok:
-            self.set_timer_interval(val)
+    def toggle_free_line_drawing(self, checked):
+        self.free_line_drawing_mode = checked
+        if checked:
+            # Disable other line modes when this one is activated
+            self.line_drawing_mode = False
+            self.horizontal_line_drawing_mode = False
+            self.line_tool_btn.setChecked(False)
+            self.hline_tool_btn.setChecked(False)
+        if not checked:
+            # Reset current line start when mode is deactivated
+            self.current_line_start = None
+        self._update_cursor_and_status()
 
-    def open_current_in_explorer(self):
-        if not self.current_image:
-            return
-        path = os.path.abspath(self.current_image)
-        folder = os.path.dirname(path)
-        if os.name == "nt":
-            os.startfile(folder)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", folder])
+    def _update_cursor_and_status(self):
+        """Update cursor and status message based on active drawing modes"""
+        if self.free_line_drawing_mode:
+            self.image_label.setCursor(Qt.CrossCursor)
+            if self.current_line_start is None:
+                self.status.showMessage("Free line drawing mode - Click first point to start line")
+            else:
+                self.status.showMessage("Free line drawing mode - Click second point to complete line")
+        elif self.line_drawing_mode and self.horizontal_line_drawing_mode:
+            self.image_label.setCursor(Qt.CrossCursor)
+            self.status.showMessage("Drawing mode active - Click to draw both vertical and horizontal lines")
+        elif self.line_drawing_mode:
+            self.image_label.setCursor(Qt.CrossCursor)
+            self.status.showMessage("Vertical line drawing mode active - Click on image to draw vertical lines")
+        elif self.horizontal_line_drawing_mode:
+            self.image_label.setCursor(Qt.CrossCursor)
+            self.status.showMessage("Horizontal line drawing mode active - Click on image to draw horizontal lines")
         else:
-            subprocess.Popen(["xdg-open", folder])
+            self.image_label.setCursor(Qt.ArrowCursor)
+            self.status.showMessage("")
 
-    def handle_wheel_zoom(self, angle):
-        # angle is in 1/8th degree steps, so 120 per notch
-        if angle > 0:
-            self.zoom_in()
+    def update_line_thickness(self, value):
+        self.line_thickness = value
+        if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            self.display_image(self.current_image)
+
+    def add_line(self, x_position):
+        if x_position not in self.drawn_lines:
+            self.drawn_lines.append(x_position)
+            if self.current_image:
+                self.display_image(self.current_image)
+
+    def add_hline(self, y_position):
+        if y_position not in self.drawn_horizontal_lines:
+            self.drawn_horizontal_lines.append(y_position)
+            if self.current_image:
+                self.display_image(self.current_image)
+
+    def add_free_line_point(self, x, y):
+        """Handle clicks for free line drawing - first click sets start, second click completes line"""
+        if self.current_line_start is None:
+            # First click - set start point
+            self.current_line_start = (x, y)
+            self.status.showMessage(f"Line start set at ({x:.0f}, {y:.0f}) - Click second point to complete line")
         else:
-            self.zoom_out()
+            # Second click - complete the line
+            start_x, start_y = self.current_line_start
+            end_x, end_y = x, y
+            
+            # Add the completed line to our list
+            line = {
+                'start': (start_x, start_y),
+                'end': (end_x, end_y)
+            }
+            self.drawn_free_lines.append(line)
+            
+            # Reset for next line
+            self.current_line_start = None
+            
+            # Update display
+            if self.current_image:
+                self.display_image(self.current_image)
+            
+            self.status.showMessage(f"Line drawn from ({start_x:.0f}, {start_y:.0f}) to ({end_x:.0f}, {end_y:.0f})")
 
-    def zoom_in(self):
-        self.zoom_factor = min(self.zoom_factor * 1.15, 8.0)
+    def clear_lines(self):
+        self.drawn_lines.clear()
+        self.drawn_horizontal_lines.clear()
+        self.drawn_free_lines.clear()
+        self.current_line_start = None
         if self.current_image:
             self.display_image(self.current_image)
 
-    def zoom_out(self):
-        self.zoom_factor = max(self.zoom_factor / 1.15, 0.1)
+    def undo_last_line(self):
+        """Remove the most recently added line (vertical, horizontal, or free line)"""
+        removed_something = False
+        
+        # Prioritize free lines, then horizontal, then vertical
+        if self.drawn_free_lines:
+            # Remove the last free line
+            self.drawn_free_lines.pop()
+            removed_something = True
+        elif self.drawn_horizontal_lines:
+            # Remove the last horizontal line
+            self.drawn_horizontal_lines.pop()
+            removed_something = True
+        elif self.drawn_lines:
+            # Remove the last vertical line
+            self.drawn_lines.pop()
+            removed_something = True
+        
+        # Also reset current line start if we're in the middle of drawing a free line
+        if self.current_line_start is not None:
+            self.current_line_start = None
+            removed_something = True
+            self._update_cursor_and_status()  # Update status message
+        
+        if removed_something:
+            if self.current_image:
+                self.display_image(self.current_image)
+            self.status.showMessage("Removed last line")
+        else:
+            self.status.showMessage("No lines to remove")
+
+    def toggle_always_on_top(self, checked):
+        self.always_on_top = checked
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, checked)
+        self._update_title()  # Update title to reflect always on top status
+        self.show()  # Necessary to apply the window flag change immediately
+
+    def toggle_grayscale(self, checked):
+        self.grayscale_value = 100 if checked else 0
+        self.grayscale_slider.setValue(self.grayscale_value)
+        # Clear caches and force immediate update
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        if self.current_image:
+            self.display_image(self.current_image)
+
+    def update_grayscale(self, value):
+        self.grayscale_value = value
+        # Clear enhancement cache when settings change
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()  # Also clear scaled cache to force refresh
+        if self.current_image:
+            self.display_image(self.current_image)
+
+    def update_contrast(self, value):
+        self.contrast_value = value
+        # Clear enhancement cache when settings change
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()  # Also clear scaled cache to force refresh
+        if self.current_image:
+            self.display_image(self.current_image)
+
+    def update_gamma(self, value):
+        self.gamma_value = value
+        # Clear enhancement cache when settings change
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()  # Also clear scaled cache to force refresh
+        if self.current_image:
+            self.display_image(self.current_image)
+
+    def reset_enhancements(self):
+        self.grayscale_slider.setValue(0)
+        self.contrast_slider.setValue(50)
+        self.gamma_slider.setValue(50)
+        self.grayscale_value = 0
+        self.contrast_value = 50
+        self.gamma_value = 50
+        # Clear all caches when resetting
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
         if self.current_image:
             self.display_image(self.current_image)
 
     def reset_zoom(self):
-        self.zoom_factor = 1.0
+        """Reset image zoom and pan to 100%"""
+        if self.image_label:
+            self.image_label.reset_zoom()
+            if self.current_image:
+                self.display_image(self.current_image)
+            self.status.showMessage("Zoom reset to 100%")
+
+    def rotate_image_90(self):
+        """Rotate the current image by 90 degrees"""
         if self.current_image:
+            self.rotation_angle = (self.rotation_angle + 90) % 360
+            # Clear caches since rotation changes the image
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
+            # Redisplay the image with new rotation
             self.display_image(self.current_image)
+            self.status.showMessage(f"Rotated to {self.rotation_angle}°")
+
+    def copy_to_clipboard(self):
+        """Copy the current displayed image (with all enhancements and lines) to clipboard"""
+        if not self.current_image or not self.image_label.pixmap():
+            self.status.showMessage("No image to copy")
+            return
+        
+        try:
+            # Get the currently displayed pixmap (this includes all enhancements and lines)
+            current_pixmap = self.image_label.pixmap()
+            
+            if current_pixmap and not current_pixmap.isNull():
+                # Copy to clipboard
+                clipboard = QApplication.clipboard()
+                clipboard.setPixmap(current_pixmap)
+                
+                # Show confirmation message
+                filename = os.path.basename(self.current_image)
+                self.status.showMessage(f"Copied {filename} to clipboard (with enhancements and lines)")
+            else:
+                self.status.showMessage("No image available to copy")
+                
+        except Exception as e:
+            self.status.showMessage(f"Error copying to clipboard: {str(e)}")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Left:
+            self.show_previous_image()
+        elif event.key() == Qt.Key_Right:
+            self.show_next_image()
+        else:
+            super().keyPressEvent(event)
+
+    def show_previous_image(self):
+        if self.history_index > 0:
+            self.history_index -= 1
+            img_path = self.history[self.history_index]
+            self.display_image(img_path)
+            self.current_image = img_path
+            self.update_image_info(img_path)
+            self.set_status_path(img_path)
+            if self._auto_advance_active:
+                self.timer_remaining = self.timer_spin.value()
+                self._update_ring()
+
+    def show_next_image(self):
+        if self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            img_path = self.history[self.history_index]
+            self.display_image(img_path)
+            self.current_image = img_path
+            self.update_image_info(img_path)
+            self.set_status_path(img_path)
+            if self._auto_advance_active:
+                self.timer_remaining = self.timer_spin.value()
+                self._update_ring()
+        else:
+            self.show_random_image()
+
+    def choose_folder(self):
+        # Set default folder if it exists
+        default_folder = r"Y:\_REFERENCES_MAIN"
+        start_dir = default_folder if os.path.exists(default_folder) else ""
+        
+        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder", start_dir)
+        if folder:
+            self.folder = folder
+            self.images = get_images_in_folder(folder)
+            self.history.clear()
+            self.history_list.clear()
+            self.history_list.repaint()
+            self.current_image = None
+            self.history_index = -1  # Reset history navigation
+            self.update_image_info()
+            self._update_title()
+            if self.images:
+                self.show_random_image()
+            else:
+                self.image_label.setText("No images found in selected folder or its subfolders.")
+            self._reset_timer()
 
 if __name__ == "__main__":
+    setup_image_allocation_limit()  # Increase image allocation limit at startup
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
-    app.setWindowIcon(emoji_icon("🎲", 128))
     viewer = RandomImageViewer()
     viewer.show()
     sys.exit(app.exec())
