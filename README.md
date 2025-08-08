@@ -17,8 +17,6 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 
 +
 
-Based on the modifications I made to your fork of the random image viewer, here's a comprehensive summary of the **Free Line Drawing Tool** feature that was added:
-
 ## New Feature: Free Line Drawing Tool
 
 ### Overview
@@ -218,3 +216,4 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
