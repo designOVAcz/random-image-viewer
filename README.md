@@ -20,7 +20,7 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 
 ---
 
-## 🆕 **Latest Enhancements (January 2025)**
+## 🆕 **Latest Enhancements**
 
 ### 🔄 **Image Flip Operations**
 - **Horizontal Flip**: `⟷` button and `Ctrl+H` shortcut
@@ -327,6 +327,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
