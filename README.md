@@ -15,6 +15,90 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 - 🌑 **Dark Theme:** Clean, minimal dark UI.
 - 🖥️ **Cross-platform:** Works on Windows, macOS, and Linux.
 
++
+
+Based on the modifications I made to your fork of the random image viewer, here's a comprehensive summary of the **Free Line Drawing Tool** feature that was added:
+
+## New Feature: Free Line Drawing Tool
+
+### Overview
+Added a new line drawing tool that allows users to draw straight lines between any two points on the image using a 2-click interface, complementing the existing vertical and horizontal line tools.
+
+### Key Features
+
+#### 🎯 **Two-Click Line Creation**
+- **First click**: Sets the start point of the line
+- **Second click**: Completes the line by setting the end point
+- **Third click**: Automatically starts a new line
+- Visual feedback in status bar showing current operation state
+
+#### 🛠️ **UI Integration**
+- **New toolbar button**: `╱` icon for free line drawing mode
+- **Mutually exclusive modes**: Only one line drawing tool can be active at a time
+- **Cross cursor**: Visual indicator when free line mode is active
+- **Status messages**: Real-time feedback for user interactions
+
+#### 🔄 **Full Rotation Support**
+- **Complete coordinate transformation**: Lines maintain correct positions during 90°, 180°, and 270° image rotations
+- **Consistent behavior**: Matches the transformation logic of existing vertical/horizontal line tools
+- **All zoom levels**: Works correctly at any zoom factor and pan position
+
+#### 🎨 **Visual Consistency**
+- **Same styling**: Uses identical white color and user-configurable thickness (1-10px)
+- **Integrated rendering**: Drawn with the same QPainter system as other lines
+- **Anti-aliasing**: Clean, smooth line appearance
+
+#### 📐 **Enhanced Line Management**
+- **Unified undo system**: "Undo Last Line" button works with all line types (prioritizes free lines → horizontal → vertical)
+- **Clear all functionality**: "Clear All Lines" button removes all line types including free lines
+- **Persistent across images**: Lines are cleared when navigating to new images
+- **Copy integration**: Free lines are included when copying images to clipboard
+
+#### 🐛 **Robust Rendering**
+- **Improved bounds checking**: Prevents lines from disappearing at certain zoom levels
+- **Tolerance handling**: 10-pixel tolerance prevents precision issues from hiding lines
+- **QPainter clipping**: Automatic clipping for lines extending beyond visible area
+- **Performance optimized**: Efficient coordinate transformation and caching
+
+### Technical Implementation
+
+#### **New Class Properties**
+```python
+self.free_line_drawing_mode = False
+self.drawn_free_lines = []  # List of {start: (x,y), end: (x,y)} dictionaries
+self.current_line_start = None  # Tracks first click point
+```
+
+#### **Enhanced Methods**
+- `toggle_free_line_drawing()`: Activates/deactivates free line mode
+- `add_free_line_point()`: Handles two-click line creation workflow
+- Enhanced `display_image()`: Renders free lines with full rotation support
+- Enhanced `undo_last_line()`: Supports all line types
+- Enhanced `clear_lines()`: Clears all line types
+
+#### **Coordinate Transformation**
+Implements precise coordinate transformation for all rotation angles:
+- **90°**: `(x,y) → (width-y, x)`
+- **180°**: `(x,y) → (width-x, height-y)`
+- **270°**: `(x,y) → (y, height-x)`
+- **0°**: `(x,y) → (x,y)` (no transformation)
+
+### Usage
+1. Click the `╱` button to activate free line drawing mode
+2. Click on the image to set the start point of your line
+3. Click a second point to complete the line
+4. Click a third point to start drawing another line
+5. Use the undo button (↶) to remove the last drawn line
+6. Use the trash button (🗑) to clear all lines
+
+### Integration Benefits
+- **Seamless workflow**: Integrates perfectly with existing zoom, pan, rotation, and enhancement features
+- **Consistent UX**: Follows the same interaction patterns as vertical/horizontal line tools
+- **Professional quality**: Enterprise-grade coordinate transformation and rendering system
+- **Performance optimized**: Uses the same efficient caching and rendering pipeline
+
+This feature transforms the image viewer from having basic vertical/horizontal line capabilities to a comprehensive line annotation tool suitable for detailed image analysis and markup workflows.
+
 ---
 
 ## Installation
@@ -131,5 +215,6 @@ You can compile this app to a standalone executable for Windows, Linux, or Mac u
 MIT License.
 
 ---
+
 
 **Enjoy browsing your images!**
