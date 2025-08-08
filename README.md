@@ -11,7 +11,8 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 - ⏮️ ⏭️ **History Navigation:** Go back and forward through viewed images.
 - 🕒 **Auto-Advance Timer:** Automatically switch to a new random image at set intervals, with a circular countdown overlay.
 - 🔍 **Zoom:** Zoom in/out/reset with mouse wheel, keyboard, or context menu.
-- 🖱️ **Smart Context Menu:** Right-click for actions (auto-hides when zoomed to avoid pan interference).
+- �️ **Fullscreen Mode:** Toggle fullscreen with F11 key or toolbar button for immersive viewing.
+- �🖱️ **Smart Context Menu:** Right-click for actions (auto-hides when zoomed to avoid pan interference).
 - 🎨 **OS-Adaptive Theme:** Automatically detects Windows dark/light mode preferences.
 - ⌨️ **Full Keyboard Support:** Complete shortcut system for all operations.
 - 🔄 **Image Transformations:** Flip horizontal/vertical with visual state indicators.
@@ -20,9 +21,16 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 
 ---
 
-## 🆕 **Latest Enhancements**
+## 🆕 **Latest Enhancements (January 2025)**
 
-### 🔄 **Image Flip Operations**
+### �️ **Fullscreen Mode**
+- **Immersive Viewing**: `⛶` toolbar button and `F11` shortcut for fullscreen
+- **Easy Exit**: Press `Esc` or `F11` to return to windowed mode
+- **State Preservation**: Automatically restores window size and position
+- **Context Menu Integration**: Fullscreen toggle accessible via right-click
+- **Visual Feedback**: Button state indicates current fullscreen status
+
+### �🔄 **Image Flip Operations**
 - **Horizontal Flip**: `⟷` button and `Ctrl+H` shortcut
 - **Vertical Flip**: `↕` button and `Ctrl+V` shortcut  
 - **Visual State Indicators**: Checkable buttons show current flip status
@@ -50,6 +58,8 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 | Shortcut | Action |
 |----------|--------|
 | `←` / `→` | Navigate image history |
+| `F11` | Toggle fullscreen mode |
+| `Esc` | Exit fullscreen mode |
 | `Ctrl++` / `Ctrl+=` | Zoom in |
 | `Ctrl+-` | Zoom out |
 | `Ctrl+0` | Reset zoom to 100% |
@@ -246,6 +256,8 @@ On Windows systems, the application automatically detects your OS dark/light mod
 ### ⌨️ **Keyboard Shortcuts**
 - **Left Arrow:** Previous image
 - **Right Arrow:** Next image (random if at end)
+- **F11:** Toggle fullscreen mode *(NEW)*
+- **Esc:** Exit fullscreen mode *(NEW)*
 - **Ctrl + +:** Zoom in
 - **Ctrl + -:** Zoom out
 - **Ctrl + 0:** Reset zoom
@@ -261,6 +273,8 @@ On Windows systems, the application automatically detects your OS dark/light mod
   - Zoom In (`Ctrl++`)
   - Zoom Out (`Ctrl+-`)
   - Reset Zoom (`Ctrl+0`)
+- **View Options:** *(NEW)*
+  - Fullscreen (`F11`)
 - **Image Transformations:** *(NEW)*
   - Flip Horizontal (`Ctrl+H`)
   - Flip Vertical (`Ctrl+V`)
@@ -268,6 +282,12 @@ On Windows systems, the application automatically detects your OS dark/light mod
   - Grayscale Toggle
 
 ### 🎯 **Quick Usage Guide**
+
+#### Image Viewing & Navigation
+1. **Fullscreen Mode**: Press `F11` or click `⛶` for immersive viewing experience
+   - Press `Esc` or `F11` again to exit fullscreen
+   - All features work in fullscreen mode
+2. **Zoom & Pan**: Use mouse wheel to zoom, right-click drag to pan when zoomed
 
 #### Image Transformation Workflow
 1. **Flip Operations**: Use toolbar buttons `⟷` `↕` or keyboard shortcuts `Ctrl+H` `Ctrl+V`
@@ -327,7 +347,6 @@ MIT License.
 
 
 **Enjoy browsing your images!**
-
 
 
 
