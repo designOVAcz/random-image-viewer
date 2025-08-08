@@ -15,7 +15,7 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 - 🌑 **Dark Theme:** Clean, minimal dark UI.
 - 🖥️ **Cross-platform:** Works on Windows, macOS, and Linux.
 
-+
+---
 
 ## New Feature: Free Line Drawing Tool
 
@@ -216,4 +216,5 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
