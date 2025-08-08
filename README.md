@@ -17,85 +17,123 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 
 ---
 
-## New Feature: Free Line Drawing Tool
+## Complete Feature Summary - Enhanced Random Image Viewer
 
-### Overview
-Added a new line drawing tool that allows users to draw straight lines between any two points on the image using a 2-click interface, complementing the existing vertical and horizontal line tools.
+### 🎯 **New Feature: Free Line Drawing Tool**
+- **Two-click line creation**: Draw straight lines between any two points
+- **UI Integration**: New `╱` toolbar button with mutually exclusive mode behavior
+- **Full rotation support**: Correct coordinate transformation for all rotation angles
+- **Enhanced line management**: Unified undo/clear system for all line types
+- **Robust rendering**: Improved bounds checking to prevent lines disappearing at certain zoom levels
 
-### Key Features
+### 🚀 **Performance & Memory Optimizations**
 
-#### 🎯 **Two-Click Line Creation**
-- **First click**: Sets the start point of the line
-- **Second click**: Completes the line by setting the end point
-- **Third click**: Automatically starts a new line
-- Visual feedback in status bar showing current operation state
+#### **Enhanced Caching System**
+- **Dual-layer caching**: Separate caches for base pixmaps and enhanced versions
+- **LRU-like behavior**: Automatic cache management with configurable size limits
+- **Smart cache keys**: Include enhancement settings, rotation, zoom, and pan in cache keys
+- **Garbage collection**: Periodic memory cleanup to prevent memory leaks
+- **Cache invalidation**: Intelligent clearing when settings change
 
-#### 🛠️ **UI Integration**
-- **New toolbar button**: `╱` icon for free line drawing mode
-- **Mutually exclusive modes**: Only one line drawing tool can be active at a time
-- **Cross cursor**: Visual indicator when free line mode is active
-- **Status messages**: Real-time feedback for user interactions
+#### **Optimized Image Loading**
+- **Safe loading system**: Error handling for corrupted or unsupported image files
+- **Lazy thumbnail generation**: Only create thumbnails when history panel is visible
+- **Scaled reading**: Direct thumbnail scaling during file read for faster performance
+- **Large file handling**: Special handling and size display for files >10MB
 
-#### 🔄 **Full Rotation Support**
-- **Complete coordinate transformation**: Lines maintain correct positions during 90°, 180°, and 270° image rotations
-- **Consistent behavior**: Matches the transformation logic of existing vertical/horizontal line tools
-- **All zoom levels**: Works correctly at any zoom factor and pan position
+#### **Debounced Resize Handling**
+- **Resize timer**: 100ms debounce to prevent excessive recalculations during window resizing
+- **Delayed processing**: `_delayed_resize()` method to batch resize operations
+- **Performance monitoring**: Size tracking to optimize resize behavior
 
-#### 🎨 **Visual Consistency**
-- **Same styling**: Uses identical white color and user-configurable thickness (1-10px)
-- **Integrated rendering**: Drawn with the same QPainter system as other lines
-- **Anti-aliasing**: Clean, smooth line appearance
+### 🖥️ **Enhanced UI & Layout System**
 
-#### 📐 **Enhanced Line Management**
-- **Unified undo system**: "Undo Last Line" button works with all line types (prioritizes free lines → horizontal → vertical)
-- **Clear all functionality**: "Clear All Lines" button removes all line types including free lines
-- **Persistent across images**: Lines are cleared when navigating to new images
-- **Copy integration**: Free lines are included when copying images to clipboard
+#### **Responsive Toolbar Layout**
+- **Dynamic two-row mode**: Automatically moves enhancement controls to second toolbar row when window width < 900px
+- **Intelligent switching**: Hysteresis prevents rapid mode switching
+- **State preservation**: Maintains slider values and settings during layout changes
+- **Visual feedback**: Debug logging and smooth transitions
 
-#### 🐛 **Robust Rendering**
-- **Improved bounds checking**: Prevents lines from disappearing at certain zoom levels
-- **Tolerance handling**: 10-pixel tolerance prevents precision issues from hiding lines
-- **QPainter clipping**: Automatic clipping for lines extending beyond visible area
-- **Performance optimized**: Efficient coordinate transformation and caching
+#### **Advanced Enhancement Controls**
+- **Extended ranges**: 
+  - Contrast: 0-200 (was more limited)
+  - Gamma: 0-200 with extreme values support
+  - Grayscale: 0-100 with smooth blending
+- **Fast rendering**: QPainter-based effects instead of pixel manipulation
+- **Multiple effect passes**: Additional overlay/multiply passes for extreme values
+- **Clickable sliders**: Enhanced slider interaction
 
-### Technical Implementation
+### 🔄 **Image Processing Improvements**
 
-#### **New Class Properties**
-```python
-self.free_line_drawing_mode = False
-self.drawn_free_lines = []  # List of {start: (x,y), end: (x,y)} dictionaries
-self.current_line_start = None  # Tracks first click point
-```
+#### **Unified Coordinate System**
+- **Consistent zoom handling**: Same logic for ALL zoom levels (no special cases)
+- **Accurate transformations**: Precise coordinate mapping for rotation and scaling
+- **Pan integration**: Proper offset handling in all drawing operations
+- **Bounds tolerance**: 10-pixel tolerance to prevent precision-related rendering issues
 
-#### **Enhanced Methods**
-- `toggle_free_line_drawing()`: Activates/deactivates free line mode
-- `add_free_line_point()`: Handles two-click line creation workflow
-- Enhanced `display_image()`: Renders free lines with full rotation support
-- Enhanced `undo_last_line()`: Supports all line types
-- Enhanced `clear_lines()`: Clears all line types
+#### **Enhanced Image Display**
+- **Rotation caching**: Cache rotated versions to improve performance
+- **Quality preservation**: High-quality scaling with Qt.SmoothTransformation
+- **Memory efficient**: Optimized pixmap creation and management
+- **Background filling**: Proper black background for images smaller than viewport
 
-#### **Coordinate Transformation**
-Implements precise coordinate transformation for all rotation angles:
-- **90°**: `(x,y) → (width-y, x)`
-- **180°**: `(x,y) → (width-x, height-y)`
-- **270°**: `(x,y) → (y, height-x)`
-- **0°**: `(x,y) → (x,y)` (no transformation)
+### 📐 **Advanced Line Drawing System**
 
-### Usage
-1. Click the `╱` button to activate free line drawing mode
-2. Click on the image to set the start point of your line
-3. Click a second point to complete the line
-4. Click a third point to start drawing another line
-5. Use the undo button (↶) to remove the last drawn line
-6. Use the trash button (🗑) to clear all lines
+#### **Three-Mode System**
+- **Vertical lines**: Original functionality preserved
+- **Horizontal lines**: Original functionality preserved  
+- **Free lines**: New two-point line drawing capability
+- **Mutual exclusion**: Only one mode active at a time
+- **State management**: Proper mode switching and cursor updates
 
-### Integration Benefits
-- **Seamless workflow**: Integrates perfectly with existing zoom, pan, rotation, and enhancement features
-- **Consistent UX**: Follows the same interaction patterns as vertical/horizontal line tools
-- **Professional quality**: Enterprise-grade coordinate transformation and rendering system
-- **Performance optimized**: Uses the same efficient caching and rendering pipeline
+#### **Comprehensive Line Management**
+- **Smart undo**: Prioritized removal (free → horizontal → vertical)
+- **Unified clearing**: Single button clears all line types
+- **Thickness control**: 1-10px configurable thickness for all line types
+- **Persistence**: Lines cleared automatically on new image navigation
+- **Copy integration**: All lines included in clipboard copy operations
 
-This feature transforms the image viewer from having basic vertical/horizontal line capabilities to a comprehensive line annotation tool suitable for detailed image analysis and markup workflows.
+### 🎨 **Visual & UX Enhancements**
+
+#### **Status Bar Improvements**
+- **Real-time feedback**: Clear status messages for all drawing operations
+- **Coordinate display**: Shows click coordinates during line creation
+- **Operation guidance**: Step-by-step instructions for complex operations
+- **File information**: Enhanced file size and dimension display
+
+#### **Cursor Management**
+- **Context-aware cursors**: Different cursors for different drawing modes
+- **Visual feedback**: Cross cursor for line drawing, arrow for navigation
+- **Mode indication**: Cursor changes reflect current tool state
+
+### 🛠️ **System Integration**
+
+#### **Enhanced History System**
+- **Improved navigation**: Better forward/backward history management
+- **Thumbnail optimization**: Conditional thumbnail creation for performance
+- **Memory efficient**: Lazy loading and cleanup of history items
+- **Visual indicators**: Better history panel integration
+
+#### **Cross-Platform Compatibility**
+- **File URL handling**: Proper Windows/Unix file path handling
+- **Explorer integration**: Platform-specific folder opening
+- **Path display**: Cross-platform file path presentation
+
+### 🔧 **Technical Infrastructure**
+
+#### **Error Handling**
+- **Safe image loading**: Graceful handling of corrupted files
+- **Exception management**: Try-catch blocks for critical operations
+- **User feedback**: Clear error messages in status bar
+- **Fallback behaviors**: Graceful degradation when operations fail
+
+#### **Memory Management**
+- **Cache size limits**: Configurable maximum cache sizes
+- **Automatic cleanup**: Periodic garbage collection
+- **Memory monitoring**: Cache hit/miss optimization
+- **Resource cleanup**: Proper painter and resource disposal
+
+This represents a significant evolution from a basic random image viewer to a professional-grade image analysis and annotation tool with enterprise-level performance optimizations and memory management.
 
 ---
 
@@ -216,5 +254,6 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
