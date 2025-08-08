@@ -739,6 +739,16 @@ class ImageLabel(QLabel):
         
         menu.addSeparator()
         
+        # --- View actions ---
+        fullscreen_action = QAction("Fullscreen", self)
+        fullscreen_action.setShortcut("F11")
+        fullscreen_action.setCheckable(True)
+        fullscreen_action.setChecked(self.parent_viewer.is_fullscreen)
+        fullscreen_action.toggled.connect(self.parent_viewer.toggle_fullscreen)
+        menu.addAction(fullscreen_action)
+        
+        menu.addSeparator()
+        
         # --- Settings ---
         if hasattr(self.parent_viewer, 'toggle_grayscale'):
             grayscale_action = QAction("Grayscale", self)
@@ -941,6 +951,10 @@ class RandomImageViewer(QMainWindow):
 
         # Always on top functionality
         self.always_on_top = False
+
+        # Fullscreen functionality
+        self.is_fullscreen = False
+        self.normal_geometry = None  # Store window geometry before fullscreen
 
         # Image enhancement parameters
         self.grayscale_value = 0  # 0 = color, 100 = full grayscale
@@ -1237,6 +1251,19 @@ class RandomImageViewer(QMainWindow):
         self.copy_btn.setFixedSize(24, 24)
         self.copy_btn.clicked.connect(self.copy_to_clipboard)
         toolbar.addWidget(self.copy_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Fullscreen button
+        self.fullscreen_btn = QToolButton()
+        self.fullscreen_btn.setText("⛶")
+        self.fullscreen_btn.setToolTip("Toggle Fullscreen (F11)")
+        self.fullscreen_btn.setCheckable(True)
+        self.fullscreen_btn.setFixedSize(24, 24)
+        self.fullscreen_btn.toggled.connect(self.toggle_fullscreen)
+        toolbar.addWidget(self.fullscreen_btn)
 
         toolbar.addSeparator()
 
@@ -2261,6 +2288,25 @@ class RandomImageViewer(QMainWindow):
         self._update_title()  # Update title to reflect always on top status
         self.show()  # Necessary to apply the window flag change immediately
 
+    def toggle_fullscreen(self, checked):
+        """Toggle fullscreen mode"""
+        self.is_fullscreen = checked
+        
+        if checked:
+            # Store current geometry before going fullscreen
+            self.normal_geometry = self.geometry()
+            self.showFullScreen()
+            self.status.showMessage("Fullscreen mode enabled - Press F11 or Esc to exit")
+        else:
+            # Restore normal window
+            self.showNormal()
+            if self.normal_geometry:
+                self.setGeometry(self.normal_geometry)
+            self.status.showMessage("Fullscreen mode disabled")
+        
+        # Update button state
+        self.fullscreen_btn.setChecked(checked)
+
     def toggle_grayscale(self, checked):
         self.grayscale_value = 100 if checked else 0
         self.grayscale_slider.setValue(self.grayscale_value)
@@ -2401,6 +2447,15 @@ class RandomImageViewer(QMainWindow):
             self.show_previous_image()
         elif event.key() == Qt.Key_Right:
             self.show_next_image()
+        elif event.key() == Qt.Key_F11:
+            # Toggle fullscreen mode
+            self.toggle_fullscreen(not self.is_fullscreen)
+        elif event.key() == Qt.Key_Escape:
+            # Exit fullscreen if in fullscreen mode
+            if self.is_fullscreen:
+                self.toggle_fullscreen(False)
+            else:
+                super().keyPressEvent(event)
         elif event.modifiers() & Qt.ControlModifier:
             if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
                 self.zoom_in()
