@@ -4,13 +4,20 @@ import random
 import time
 import subprocess
 import gc
+try:
+    import winreg  # For Windows registry access (dark mode detection)
+    import ctypes
+    import ctypes.wintypes  # For Windows API calls (dark mode title bar)
+except ImportError:
+    winreg = None  # Not on Windows
+    ctypes = None
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QFileDialog, QVBoxLayout, QWidget,
     QListWidget, QListWidgetItem, QSplitter, QSpinBox, QCheckBox,
     QStatusBar, QToolBar, QToolButton, QSizePolicy, QSlider, QHBoxLayout,
-    QStyle, QStyleOptionSlider, QGridLayout
+    QStyle, QStyleOptionSlider, QGridLayout, QMenu
 )
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction
 from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QRect
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
@@ -28,6 +35,69 @@ def get_image_file_size(file_path):
         return size_mb
     except OSError:
         return 0
+
+def is_windows_dark_mode():
+    """Detect if Windows is using dark mode"""
+    if not winreg or os.name != 'nt':
+        return True  # Default to dark mode on non-Windows or if winreg unavailable
+    
+    try:
+        # Check Windows theme setting
+        registry_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        value, _ = winreg.QueryValueEx(registry_key, "AppsUseLightTheme")
+        winreg.CloseKey(registry_key)
+        return value == 0  # 0 = dark mode, 1 = light mode
+    except:
+        return True  # Default to dark mode if detection fails
+
+def enable_windows_dark_title_bar(window):
+    """Enable dark mode title bar on Windows 10/11"""
+    if not ctypes or os.name != 'nt':
+        return  # Not on Windows or ctypes unavailable
+    
+    try:
+        # Get the window handle
+        hwnd = int(window.winId())
+        print(f"DEBUG: Window handle: {hwnd}")
+        
+        # Try the Windows 11 method first (DWMWA_USE_IMMERSIVE_DARK_MODE = 20)
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        value = ctypes.c_int(1)  # Enable dark mode
+        
+        # Try to load dwmapi.dll and call DwmSetWindowAttribute
+        dwmapi = ctypes.windll.dwmapi
+        result = dwmapi.DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            ctypes.byref(value),
+            ctypes.sizeof(value)
+        )
+        print(f"DEBUG: Windows 11 dark mode result: {result}")
+        
+        # If that fails, try the Windows 10 method (DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19)
+        if result != 0:
+            DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
+            result2 = dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                ctypes.byref(value),
+                ctypes.sizeof(value)
+            )
+            print(f"DEBUG: Windows 10 dark mode result: {result2}")
+        
+        return result == 0  # Return success status
+        
+    except Exception as e:
+        print(f"DEBUG: Exception in dark title bar: {e}")
+        return False
+
+def get_adaptive_stylesheet():
+    """Get stylesheet based on OS theme"""
+    if is_windows_dark_mode():
+        return DARK_STYLESHEET
+    else:
+        return LIGHT_STYLESHEET
 
 def smart_load_pixmap(file_path, max_dimension=2048):
     """Load pixmap with smart downscaling for better performance"""
@@ -159,6 +229,28 @@ QPushButton:hover, QToolButton:hover { background: #2e3034; }
 QPushButton:checked, QToolButton:checked { background: #3b7dd8; color: #fff; }
 QListWidget::item:selected { background: #354e6e; color: #fff; }
 QCheckBox:checked { color: #3b7dd8; }
+QSlider::groove:horizontal {
+    background: #35383b;
+    height: 6px;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #b7bcc1;
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    margin: -4px 0;
+}
+QSlider::handle:horizontal:hover {
+    background: #3b7dd8;
+}
+QSpinBox {
+    background: #35383b;
+    border: 1px solid #4a4d50;
+    border-radius: 3px;
+    padding: 2px;
+    selection-background-color: #3b7dd8;
+}
 QToolBar::separator {
     background: #35383b;
     width: 1px;
@@ -166,7 +258,95 @@ QToolBar::separator {
 }
 QToolBar {
     border: none;
-    background: #232629; /* or your preferred color */
+    background: #232629;
+}
+QMenu {
+    background: #232629;
+    border: 1px solid #35383b;
+    color: #b7bcc1;
+}
+QMenu::item {
+    padding: 4px 20px;
+    background: transparent;
+}
+QMenu::item:selected {
+    background: #3b7dd8;
+    color: #fff;
+}
+QMenu::separator {
+    height: 1px;
+    background: #35383b;
+    margin: 2px 0;
+}
+"""
+
+LIGHT_STYLESHEET = """
+QWidget { background-color: #ffffff; color: #333333; font-size: 11px; }
+QLabel, QCheckBox, QSpinBox, QListWidget, QToolButton { font-size: 11px; color: #333333; }
+QStatusBar { font-size: 10px; color: #666; }
+QSplitter::handle { background: #e0e0e0; border: none; height: 1px; }
+QPushButton, QToolButton {
+    background: transparent;
+    color: #333333;
+    border: none;
+    border-radius: 4px;
+    min-width: 24px;
+    min-height: 24px;
+    font-size: 13px;
+    padding: 0 2px;
+}
+QPushButton:hover, QToolButton:hover { background: #e6e6e6; }
+QPushButton:checked, QToolButton:checked { background: #0078d4; color: #fff; }
+QListWidget::item:selected { background: #0078d4; color: #fff; }
+QCheckBox:checked { color: #0078d4; }
+QSlider::groove:horizontal {
+    background: #e0e0e0;
+    height: 6px;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #666666;
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    margin: -4px 0;
+}
+QSlider::handle:horizontal:hover {
+    background: #0078d4;
+}
+QSpinBox {
+    background: #ffffff;
+    border: 1px solid #cccccc;
+    border-radius: 3px;
+    padding: 2px;
+    selection-background-color: #0078d4;
+}
+QToolBar::separator {
+    background: #cccccc;
+    width: 1px;
+    margin: 0 4px;
+}
+QToolBar {
+    border: none;
+    background: #f5f5f5;
+}
+QMenu {
+    background: #ffffff;
+    border: 1px solid #cccccc;
+    color: #333333;
+}
+QMenu::item {
+    padding: 4px 20px;
+    background: transparent;
+}
+QMenu::item:selected {
+    background: #0078d4;
+    color: #fff;
+}
+QMenu::separator {
+    height: 1px;
+    background: #cccccc;
+    margin: 2px 0;
 }
 """
 
@@ -267,6 +447,10 @@ class ImageLabel(QLabel):
         
         # Store original pixmap size for proper zoom calculations
         self.original_pixmap = None
+        
+        # Enable context menu
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
         
     def wheelEvent(self, event):
         """Handle mouse wheel events for zooming"""
@@ -413,30 +597,45 @@ class ImageLabel(QLabel):
                 display_x = rel_x / scale_x
                 display_y = rel_y / scale_y
                 
-                # Transform coordinates back to original unrotated coordinate space
+                # Transform coordinates back to original coordinate space
+                # We need to reverse the transformation sequence used in display_image:
+                # display_image applies: 1) flips first, 2) then rotation
+                # So we reverse: 1) undo rotation first, 2) then undo flips
+                
                 rotation = self.parent_viewer.rotation_angle
+                flipped_h = self.parent_viewer.flipped_h
+                flipped_v = self.parent_viewer.flipped_v
+                
+                # Step 1: Undo rotation transformation
                 if rotation == 0:
                     # No rotation
-                    original_x = display_x
-                    original_y = display_y
+                    unrotated_x = display_x
+                    unrotated_y = display_y
                 elif rotation == 90:
-                    # 90° clockwise: For a point in rotated space, map back to original space
-                    # In rotated space: click on what appears as (display_x, display_y)
-                    # In original space: this corresponds to (original_y came from display_x, original_x came from height-display_y)
-                    original_x = display_reference_size.height() - display_y
-                    original_y = display_x
+                    # Undo 90° clockwise rotation
+                    unrotated_x = display_y
+                    unrotated_y = display_reference_size.width() - display_x
                 elif rotation == 180:
-                    # 180°: both coordinates are flipped
-                    original_x = original_size.width() - display_x
-                    original_y = original_size.height() - display_y
+                    # Undo 180° rotation
+                    unrotated_x = display_reference_size.width() - display_x
+                    unrotated_y = display_reference_size.height() - display_y
                 elif rotation == 270:
-                    # 270° clockwise: Map back from rotated to original space
-                    original_x = display_y
-                    original_y = display_reference_size.width() - display_x
+                    # Undo 270° clockwise rotation
+                    unrotated_x = display_reference_size.height() - display_y
+                    unrotated_y = display_x
                 else:
                     # Fallback for other angles
-                    original_x = display_x
-                    original_y = display_y
+                    unrotated_x = display_x
+                    unrotated_y = display_y
+                
+                # Step 2: Undo flip transformations to get original coordinates
+                original_x = unrotated_x
+                original_y = unrotated_y
+                
+                if flipped_h:
+                    original_x = original_size.width() - unrotated_x
+                if flipped_v:
+                    original_y = original_size.height() - unrotated_y
                 
                 # Add lines using original coordinates (these will be transformed during display)
                 if self.parent_viewer.line_drawing_mode:
@@ -480,6 +679,76 @@ class ImageLabel(QLabel):
             return
         
         super().mouseReleaseEvent(event)
+    
+    def show_context_menu(self, pos):
+        """Show context menu with image and zoom options"""
+        if not self.parent_viewer:
+            return
+        
+        # Hide context menu when zoomed in to avoid interfering with panning
+        if hasattr(self, 'zoom_factor') and self.zoom_factor > 1.0:
+            return
+            
+        menu = QMenu(self)
+        
+        # --- Main actions ---
+        open_action = QAction("Open Folder", self)
+        open_action.triggered.connect(self.parent_viewer.choose_folder)
+        menu.addAction(open_action)
+        
+        menu.addSeparator()
+        
+        prev_action = QAction("Previous Image", self)
+        prev_action.triggered.connect(self.parent_viewer.show_previous_image)
+        menu.addAction(prev_action)
+        
+        next_action = QAction("Next Random Image", self)
+        next_action.triggered.connect(self.parent_viewer.show_random_image)
+        menu.addAction(next_action)
+        
+        menu.addSeparator()
+        
+        # --- Zoom actions ---
+        zoom_in_action = QAction("Zoom In", self)
+        zoom_in_action.setShortcut("Ctrl++")
+        zoom_in_action.triggered.connect(self.parent_viewer.zoom_in)
+        menu.addAction(zoom_in_action)
+        
+        zoom_out_action = QAction("Zoom Out", self)
+        zoom_out_action.setShortcut("Ctrl+-")
+        zoom_out_action.triggered.connect(self.parent_viewer.zoom_out)
+        menu.addAction(zoom_out_action)
+        
+        reset_zoom_action = QAction("Reset Zoom", self)
+        reset_zoom_action.setShortcut("Ctrl+0")
+        reset_zoom_action.triggered.connect(self.parent_viewer.reset_zoom)
+        menu.addAction(reset_zoom_action)
+        
+        menu.addSeparator()
+        
+        # --- Transform actions ---
+        flip_h_action = QAction("Flip Horizontal", self)
+        flip_h_action.setShortcut("Ctrl+H")
+        flip_h_action.triggered.connect(self.parent_viewer.flip_horizontal)
+        menu.addAction(flip_h_action)
+        
+        flip_v_action = QAction("Flip Vertical", self)
+        flip_v_action.setShortcut("Ctrl+V")
+        flip_v_action.triggered.connect(self.parent_viewer.flip_vertical)
+        menu.addAction(flip_v_action)
+        
+        menu.addSeparator()
+        
+        # --- Settings ---
+        if hasattr(self.parent_viewer, 'toggle_grayscale'):
+            grayscale_action = QAction("Grayscale", self)
+            grayscale_action.setCheckable(True)
+            grayscale_action.setChecked(self.parent_viewer.grayscale_value > 0)
+            grayscale_action.toggled.connect(self.parent_viewer.toggle_grayscale)
+            menu.addAction(grayscale_action)
+        
+        # Show the menu
+        menu.exec(self.mapToGlobal(pos))
     
     def reset_zoom(self):
         """Reset zoom to 100% and clear pan"""
@@ -678,6 +947,8 @@ class RandomImageViewer(QMainWindow):
         self.contrast_value = 50  # 50 = normal, 0-100 range
         self.gamma_value = 50     # 50 = normal, 0-100 range
         self.rotation_angle = 0   # Rotation angle in degrees
+        self.flipped_h = False    # Horizontal flip state
+        self.flipped_v = False    # Vertical flip state
         self.original_pixmap = None  # Cache original image for fast processing
         self.enhancement_cache = {}  # Cache enhanced versions
 
@@ -928,6 +1199,32 @@ class RandomImageViewer(QMainWindow):
         self.rotate_btn.setFixedSize(24, 24)
         self.rotate_btn.clicked.connect(self.rotate_image_90)
         toolbar.addWidget(self.rotate_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Flip horizontal button
+        self.flip_h_btn = QToolButton()
+        self.flip_h_btn.setText("⟷")
+        self.flip_h_btn.setToolTip("Flip Image Horizontally")
+        self.flip_h_btn.setCheckable(True)
+        self.flip_h_btn.setFixedSize(24, 24)
+        self.flip_h_btn.clicked.connect(self.flip_horizontal)
+        toolbar.addWidget(self.flip_h_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Flip vertical button
+        self.flip_v_btn = QToolButton()
+        self.flip_v_btn.setText("↕")
+        self.flip_v_btn.setToolTip("Flip Image Vertically")
+        self.flip_v_btn.setCheckable(True)
+        self.flip_v_btn.setFixedSize(24, 24)
+        self.flip_v_btn.clicked.connect(self.flip_vertical)
+        toolbar.addWidget(self.flip_v_btn)
 
         spacer = QWidget()
         spacer.setFixedWidth(4)
@@ -1201,8 +1498,15 @@ class RandomImageViewer(QMainWindow):
         self.drawn_horizontal_lines.clear()
         self.drawn_free_lines.clear()
         self.current_line_start = None
-        # Reset rotation angle for new image
+        # Reset rotation angle and flips for new image
         self.rotation_angle = 0
+        self.flipped_h = False
+        self.flipped_v = False
+        # Reset button states
+        if hasattr(self, 'flip_h_btn'):
+            self.flip_h_btn.setChecked(False)
+        if hasattr(self, 'flip_v_btn'):
+            self.flip_v_btn.setChecked(False)
         available = [img for img in self.images if img not in self.history]
         if not available:
             self.history.clear()
@@ -1222,8 +1526,8 @@ class RandomImageViewer(QMainWindow):
         self.show_random_image()
 
     def display_image(self, img_path):
-        # Create cache key including enhancement settings and rotation
-        cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}"
+        # Create cache key including enhancement settings, rotation, and flips
+        cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}_{self.flipped_h}_{self.flipped_v}"
         
         # Check enhanced cache first
         if cache_key in self.enhancement_cache:
@@ -1248,13 +1552,25 @@ class RandomImageViewer(QMainWindow):
             else:
                 pixmap = base_pixmap
             
-            # Apply rotation if needed
-            if self.rotation_angle != 0:
-                # Use QTransform for rotation
-                transform = QTransform()
-                transform.rotate(self.rotation_angle)
-                rotated_image = pixmap.toImage().transformed(transform)
-                pixmap = QPixmap.fromImage(rotated_image)
+            # Apply rotation and flips if needed
+            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                image = pixmap.toImage()
+                
+                # Apply flips first
+                if self.flipped_h:
+                    transform_h = QTransform().scale(-1, 1)
+                    image = image.transformed(transform_h)
+                if self.flipped_v:
+                    transform_v = QTransform().scale(1, -1)
+                    image = image.transformed(transform_v)
+                
+                # Apply rotation
+                if self.rotation_angle != 0:
+                    transform_rot = QTransform()
+                    transform_rot.rotate(self.rotation_angle)
+                    image = image.transformed(transform_rot)
+                
+                pixmap = QPixmap.fromImage(image)
             
             # Cache the enhanced and rotated version
             self._manage_cache(self.enhancement_cache, cache_key, pixmap)
@@ -1297,116 +1613,125 @@ class RandomImageViewer(QMainWindow):
             scale_x = zoomed_width / original_size.width()
             scale_y = zoomed_height / original_size.height()
             
-            # Handle rotation for line drawing
-            if self.rotation_angle != 0:
-                # Get the rotated image dimensions for proper line transformation
-                # For rotation, we need to work with the original unrotated coordinates
-                # and then transform them according to the rotation
+            # Handle transformations for line drawing (flips and rotation)
+            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                # Get the original image dimensions for proper line transformation
+                # We need to apply the same transformation sequence: flips first, then rotation
                 
-                # Draw vertical lines (adjusted for rotation)
+                # Draw vertical lines (adjusted for flips and rotation)
                 for x in self.drawn_lines:
+                    # Apply flip transformations first
+                    transformed_x = x
+                    if self.flipped_h:
+                        transformed_x = original_size.width() - x
+                    
+                    # Then apply rotation transformation
                     if self.rotation_angle == 90:
-                        # Vertical line in original becomes horizontal in rotated display
-                        # x coordinate in original becomes y coordinate in rotated display
-                        transformed_y = x * scale_y
-                        display_y = int(transformed_y) + draw_y
+                        # Vertical line becomes horizontal
+                        transformed_y = transformed_x
+                        display_y = int(transformed_y * scale_y) + draw_y
                         if 0 <= display_y < final_pixmap.height():
                             painter.drawLine(0, display_y, final_pixmap.width(), display_y)
                     elif self.rotation_angle == 180:
-                        # Vertical line stays vertical but mirrored
-                        transformed_x = (original_size.width() - x) * scale_x
-                        display_x = int(transformed_x) + draw_x
+                        # Vertical line stays vertical but position changes
+                        final_x = original_size.width() - transformed_x
+                        display_x = int(final_x * scale_x) + draw_x
                         if 0 <= display_x < final_pixmap.width():
                             painter.drawLine(display_x, 0, display_x, final_pixmap.height())
                     elif self.rotation_angle == 270:
-                        # Vertical line in original becomes horizontal in rotated display  
-                        # x coordinate in original becomes (height - y) coordinate in rotated display
-                        transformed_y = (original_size.height() - x) * scale_y
-                        display_y = int(transformed_y) + draw_y
+                        # Vertical line becomes horizontal
+                        final_y = original_size.height() - transformed_x
+                        display_y = int(final_y * scale_y) + draw_y
                         if 0 <= display_y < final_pixmap.height():
                             painter.drawLine(0, display_y, final_pixmap.width(), display_y)
                     else:
-                        # For other angles, draw as vertical (fallback)
-                        display_x = int(x * scale_x) + draw_x
+                        # No rotation, just flips applied
+                        display_x = int(transformed_x * scale_x) + draw_x
                         if 0 <= display_x < final_pixmap.width():
                             painter.drawLine(display_x, 0, display_x, final_pixmap.height())
                 
-                # Draw horizontal lines (adjusted for rotation)
+                # Draw horizontal lines (adjusted for flips and rotation)
                 for y in self.drawn_horizontal_lines:
+                    # Apply flip transformations first
+                    transformed_y = y
+                    if self.flipped_v:
+                        transformed_y = original_size.height() - y
+                    
+                    # Then apply rotation transformation
                     if self.rotation_angle == 90:
-                        # Horizontal line in original becomes vertical in rotated display
-                        # y coordinate in original becomes (width - x) coordinate in rotated display  
-                        transformed_x = (original_size.width() - y) * scale_x
-                        display_x = int(transformed_x) + draw_x
+                        # Horizontal line becomes vertical
+                        final_x = original_size.width() - transformed_y
+                        display_x = int(final_x * scale_x) + draw_x
                         if 0 <= display_x < final_pixmap.width():
                             painter.drawLine(display_x, 0, display_x, final_pixmap.height())
                     elif self.rotation_angle == 180:
-                        # Horizontal line stays horizontal but mirrored
-                        transformed_y = (original_size.height() - y) * scale_y
-                        display_y = int(transformed_y) + draw_y
+                        # Horizontal line stays horizontal but position changes
+                        final_y = original_size.height() - transformed_y
+                        display_y = int(final_y * scale_y) + draw_y
                         if 0 <= display_y < final_pixmap.height():
                             painter.drawLine(0, display_y, final_pixmap.width(), display_y)
                     elif self.rotation_angle == 270:
-                        # Horizontal line in original becomes vertical in rotated display
-                        # y coordinate in original becomes x coordinate in rotated display
-                        transformed_x = y * scale_x
-                        display_x = int(transformed_x) + draw_x
+                        # Horizontal line becomes vertical
+                        display_x = int(transformed_y * scale_x) + draw_x
                         if 0 <= display_x < final_pixmap.width():
                             painter.drawLine(display_x, 0, display_x, final_pixmap.height())
                     else:
-                        # For other angles, draw as horizontal (fallback)
-                        display_y = int(y * scale_y) + draw_y
+                        # No rotation, just flips applied
+                        display_y = int(transformed_y * scale_y) + draw_y
                         if 0 <= display_y < final_pixmap.height():
                             painter.drawLine(0, display_y, final_pixmap.width(), display_y)
                 
-                # Draw free lines (adjusted for rotation)
+                # Draw free lines (adjusted for flips and rotation)
                 for line in self.drawn_free_lines:
                     start_x, start_y = line['start']
                     end_x, end_y = line['end']
                     
-                    # Transform coordinates based on rotation
-                    # Follow the EXACT transformation used by vertical/horizontal lines:
+                    # Apply flip transformations first
+                    flip_start_x = start_x
+                    flip_start_y = start_y
+                    flip_end_x = end_x
+                    flip_end_y = end_y
+                    
+                    if self.flipped_h:
+                        flip_start_x = original_size.width() - start_x
+                        flip_end_x = original_size.width() - end_x
+                    if self.flipped_v:
+                        flip_start_y = original_size.height() - start_y
+                        flip_end_y = original_size.height() - end_y
+                    
+                    # Then apply rotation transformation
                     if self.rotation_angle == 90:
-                        # 90° rotation transformations:
-                        # Vertical line: x → y (so start_x → start_y coordinate)
-                        # Horizontal line: y → (width - y) (so start_y → (width - start_y) coordinate)
-                        display_start_x = int((original_size.width() - start_y) * scale_x) + draw_x
-                        display_start_y = int(start_x * scale_y) + draw_y
-                        display_end_x = int((original_size.width() - end_y) * scale_x) + draw_x
-                        display_end_y = int(end_x * scale_y) + draw_y
+                        # 90° rotation transformations
+                        display_start_x = int((original_size.width() - flip_start_y) * scale_x) + draw_x
+                        display_start_y = int(flip_start_x * scale_y) + draw_y
+                        display_end_x = int((original_size.width() - flip_end_y) * scale_x) + draw_x
+                        display_end_y = int(flip_end_x * scale_y) + draw_y
                     elif self.rotation_angle == 180:
                         # 180° rotation: both coordinates are flipped
-                        display_start_x = int((original_size.width() - start_x) * scale_x) + draw_x
-                        display_start_y = int((original_size.height() - start_y) * scale_y) + draw_y
-                        display_end_x = int((original_size.width() - end_x) * scale_x) + draw_x
-                        display_end_y = int((original_size.height() - end_y) * scale_y) + draw_y
+                        display_start_x = int((original_size.width() - flip_start_x) * scale_x) + draw_x
+                        display_start_y = int((original_size.height() - flip_start_y) * scale_y) + draw_y
+                        display_end_x = int((original_size.width() - flip_end_x) * scale_x) + draw_x
+                        display_end_y = int((original_size.height() - flip_end_y) * scale_y) + draw_y
                     elif self.rotation_angle == 270:
-                        # 270° rotation transformations:
-                        # Vertical line: x → (height - x) (so start_x → (height - start_x) coordinate)
-                        # Horizontal line: y → y (so start_y → start_y coordinate)
-                        display_start_x = int(start_y * scale_x) + draw_x
-                        display_start_y = int((original_size.height() - start_x) * scale_y) + draw_y
-                        display_end_x = int(end_y * scale_x) + draw_x
-                        display_end_y = int((original_size.height() - end_x) * scale_y) + draw_y
+                        # 270° rotation transformations
+                        display_start_x = int(flip_start_y * scale_x) + draw_x
+                        display_start_y = int((original_size.height() - flip_start_x) * scale_y) + draw_y
+                        display_end_x = int(flip_end_y * scale_x) + draw_x
+                        display_end_y = int((original_size.height() - flip_end_x) * scale_y) + draw_y
                     else:
-                        # Fallback for other angles
-                        display_start_x = int(start_x * scale_x) + draw_x
-                        display_start_y = int(start_y * scale_y) + draw_y
-                        display_end_x = int(end_x * scale_x) + draw_x
-                        display_end_y = int(end_y * scale_y) + draw_y
+                        # No rotation, just flips applied
+                        display_start_x = int(flip_start_x * scale_x) + draw_x
+                        display_start_y = int(flip_start_y * scale_y) + draw_y
+                        display_end_x = int(flip_end_x * scale_x) + draw_x
+                        display_end_y = int(flip_end_y * scale_y) + draw_y
                     
                     # Draw the line with more lenient bounds checking
-                    # Allow lines to be drawn if any part might be visible (let QPainter handle clipping)
-                    # Add some tolerance to prevent precision issues from hiding lines
                     tolerance = 10  # pixels
-                    
-                    # Check if the line potentially intersects the visible area
                     min_x = min(display_start_x, display_end_x)
                     max_x = max(display_start_x, display_end_x)
                     min_y = min(display_start_y, display_end_y)
                     max_y = max(display_start_y, display_end_y)
                     
-                    # Draw if the line's bounding box intersects the pixmap (with tolerance)
                     if (max_x >= -tolerance and min_x <= final_pixmap.width() + tolerance and
                         max_y >= -tolerance and min_y <= final_pixmap.height() + tolerance):
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
@@ -1990,6 +2315,52 @@ class RandomImageViewer(QMainWindow):
                 self.display_image(self.current_image)
             self.status.showMessage("Zoom reset to 100%")
 
+    def zoom_in(self):
+        """Zoom in by 15%"""
+        if self.image_label:
+            current_zoom = getattr(self.image_label, 'zoom_factor', 1.0)
+            new_zoom = min(current_zoom * 1.15, 8.0)
+            self.image_label.zoom_factor = new_zoom
+            if self.current_image:
+                self.display_image(self.current_image)
+            self.status.showMessage(f"Zoom: {new_zoom:.1f}x")
+
+    def zoom_out(self):
+        """Zoom out by 15%"""
+        if self.image_label:
+            current_zoom = getattr(self.image_label, 'zoom_factor', 1.0)
+            new_zoom = max(current_zoom / 1.15, 0.1)
+            self.image_label.zoom_factor = new_zoom
+            if self.current_image:
+                self.display_image(self.current_image)
+            self.status.showMessage(f"Zoom: {new_zoom:.1f}x")
+
+    def flip_horizontal(self):
+        """Flip the current image horizontally"""
+        if self.current_image:
+            self.flipped_h = not self.flipped_h
+            # Update button appearance to show state
+            if hasattr(self, 'flip_h_btn'):
+                self.flip_h_btn.setChecked(self.flipped_h)
+            # Clear caches since flip changes the image
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
+            self.display_image(self.current_image)
+            self.status.showMessage(f"Horizontal flip: {'ON' if self.flipped_h else 'OFF'}")
+
+    def flip_vertical(self):
+        """Flip the current image vertically"""
+        if self.current_image:
+            self.flipped_v = not self.flipped_v
+            # Update button appearance to show state
+            if hasattr(self, 'flip_v_btn'):
+                self.flip_v_btn.setChecked(self.flipped_v)
+            # Clear caches since flip changes the image
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
+            self.display_image(self.current_image)
+            self.status.showMessage(f"Vertical flip: {'ON' if self.flipped_v else 'OFF'}")
+
     def rotate_image_90(self):
         """Rotate the current image by 90 degrees"""
         if self.current_image:
@@ -2030,8 +2401,36 @@ class RandomImageViewer(QMainWindow):
             self.show_previous_image()
         elif event.key() == Qt.Key_Right:
             self.show_next_image()
+        elif event.modifiers() & Qt.ControlModifier:
+            if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
+                self.zoom_in()
+            elif event.key() == Qt.Key_Minus:
+                self.zoom_out()
+            elif event.key() == Qt.Key_0:
+                self.reset_zoom()
+            elif event.key() == Qt.Key_H:
+                self.flip_horizontal()
+            elif event.key() == Qt.Key_V:
+                self.flip_vertical()
+            else:
+                super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
+
+    def showEvent(self, event):
+        """Override showEvent to ensure dark title bar is applied"""
+        super().showEvent(event)
+        
+        # Apply dark title bar when window is shown for the first time
+        if not hasattr(self, '_dark_title_applied'):
+            self._dark_title_applied = True
+            if is_windows_dark_mode():
+                print("DEBUG: Ensuring dark title bar in showEvent")
+                # Single clean attempt to apply dark mode
+                success = enable_windows_dark_title_bar(self)
+                if not success:
+                    # If first attempt failed, try once more after a brief delay
+                    QTimer.singleShot(100, lambda: enable_windows_dark_title_bar(self))
 
     def show_previous_image(self):
         if self.history_index > 0:
@@ -2084,7 +2483,15 @@ class RandomImageViewer(QMainWindow):
 if __name__ == "__main__":
     setup_image_allocation_limit()  # Increase image allocation limit at startup
     app = QApplication(sys.argv)
-    app.setStyleSheet(DARK_STYLESHEET)
+    app.setStyleSheet(get_adaptive_stylesheet())  # Use OS-adaptive theme
     viewer = RandomImageViewer()
+    
+    # Apply dark title bar BEFORE showing the window for professional appearance
+    if is_windows_dark_mode():
+        print("DEBUG: Applying dark title bar before window show")
+        # Apply immediately after window creation but before show
+        QTimer.singleShot(0, lambda: enable_windows_dark_title_bar(viewer))
+    
     viewer.show()
+    
     sys.exit(app.exec())
