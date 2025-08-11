@@ -21,7 +21,7 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 
 ---
 
-## 🆕 **Latest Enhancements (January 2025)**
+## 🆕 **Latest Enhancements**
 
 ### �️ **Fullscreen Mode**
 - **Immersive Viewing**: `⛶` toolbar button and `F11` shortcut for fullscreen
@@ -347,6 +347,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
