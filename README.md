@@ -2,6 +2,7 @@
 
 A simple, modern, **cross-platform** desktop app to view random images from any folder (including subfolders). Great for artists, inspiration, or just browsing your photo collection!
 
+- Edited and tested for Windows OS
 ---
 
 ## Features
@@ -347,6 +348,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
