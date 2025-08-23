@@ -15,9 +15,9 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QFileDialog, QVBoxLayout, QWidget,
     QListWidget, QListWidgetItem, QSplitter, QSpinBox, QCheckBox,
     QStatusBar, QToolBar, QToolButton, QSizePolicy, QSlider, QHBoxLayout,
-    QStyle, QStyleOptionSlider, QGridLayout, QMenu
+    QStyle, QStyleOptionSlider, QGridLayout, QMenu, QColorDialog
 )
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction, QShortcut
 from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QRect
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
@@ -740,12 +740,24 @@ class ImageLabel(QLabel):
         menu.addSeparator()
         
         # --- View actions ---
-        fullscreen_action = QAction("Fullscreen", self)
-        fullscreen_action.setShortcut("F11")
-        fullscreen_action.setCheckable(True)
-        fullscreen_action.setChecked(self.parent_viewer.is_fullscreen)
-        fullscreen_action.toggled.connect(self.parent_viewer.toggle_fullscreen)
-        menu.addAction(fullscreen_action)
+        if self.parent_viewer.is_fullscreen:
+            # When in fullscreen, show explicit exit option
+            exit_fullscreen_action = QAction("Exit Fullscreen", self)
+            exit_fullscreen_action.setShortcut("Esc")
+            exit_fullscreen_action.triggered.connect(self.parent_viewer.exit_fullscreen)
+            menu.addAction(exit_fullscreen_action)
+            
+            # Add force exit as backup
+            force_exit_action = QAction("Force Exit Fullscreen", self)
+            force_exit_action.setShortcut("Ctrl+Esc")
+            force_exit_action.triggered.connect(self.parent_viewer.force_exit_fullscreen)
+            menu.addAction(force_exit_action)
+        else:
+            # When not in fullscreen, show toggle option
+            fullscreen_action = QAction("Enter Fullscreen", self)
+            fullscreen_action.setShortcut("F11")
+            fullscreen_action.triggered.connect(lambda: self.parent_viewer.toggle_fullscreen(True))
+            menu.addAction(fullscreen_action)
         
         menu.addSeparator()
         
@@ -756,6 +768,20 @@ class ImageLabel(QLabel):
             grayscale_action.setChecked(self.parent_viewer.grayscale_value > 0)
             grayscale_action.toggled.connect(self.parent_viewer.toggle_grayscale)
             menu.addAction(grayscale_action)
+        
+        if hasattr(self.parent_viewer, 'toggle_contrast'):
+            contrast_action = QAction("Enhanced Contrast", self)
+            contrast_action.setCheckable(True)
+            contrast_action.setChecked(self.parent_viewer.contrast_value != 50)
+            contrast_action.toggled.connect(self.parent_viewer.toggle_contrast)
+            menu.addAction(contrast_action)
+        
+        if hasattr(self.parent_viewer, 'toggle_gamma'):
+            gamma_action = QAction("Enhanced Brightness", self)
+            gamma_action.setCheckable(True)
+            gamma_action.setChecked(self.parent_viewer.gamma_value != 50)
+            gamma_action.toggled.connect(self.parent_viewer.toggle_gamma)
+            menu.addAction(gamma_action)
         
         # Show the menu
         menu.exec(self.mapToGlobal(pos))
@@ -815,11 +841,11 @@ class ResponsiveEnhancementWidget(QWidget):
         self.gamma_label.setStyleSheet("font-size: 9px;")
         
         self.gamma_slider = ClickableSlider(Qt.Horizontal)
-        self.gamma_slider.setRange(0, 200)
-        self.gamma_slider.setValue(50)
+        self.gamma_slider.setRange(-200, 500)  # New range: -200=very dark, 0=normal, 500=very bright
+        self.gamma_slider.setValue(0)
         self.gamma_slider.setFixedWidth(60)
         self.gamma_slider.setFixedHeight(20)
-        self.gamma_slider.setToolTip("Gamma: 50=Normal, 0=Very Dark, 200=Very Bright")
+        self.gamma_slider.setToolTip("Gamma: -200=Very Dark, 0=Normal, 500=Very Bright")
         
         # Reset button
         self.reset_btn = QToolButton()
@@ -948,6 +974,7 @@ class RandomImageViewer(QMainWindow):
         self.drawn_free_lines = []  # List of free lines, each with start and end points
         self.current_line_start = None  # Store first click point for free line
         self.line_thickness = 1
+        self.line_color = QColor("#ffffff")  # Default white color for lines
 
         # Always on top functionality
         self.always_on_top = False
@@ -958,8 +985,8 @@ class RandomImageViewer(QMainWindow):
 
         # Image enhancement parameters
         self.grayscale_value = 0  # 0 = color, 100 = full grayscale
-        self.contrast_value = 0  # 0 = normal, -500 to +500 range
-        self.gamma_value = 0     # 0 = normal, -500 to +500 range
+        self.contrast_value = 50  # 50 = normal, 0-200 range
+        self.gamma_value = 0     # 0 = normal, -200 to +500 range
         self.rotation_angle = 0   # Rotation angle in degrees
         self.flipped_h = False    # Horizontal flip state
         self.flipped_v = False    # Vertical flip state
@@ -978,6 +1005,9 @@ class RandomImageViewer(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
+        # Create menu bar with essential shortcuts
+        self.create_menu_bar()
+        
         # Create main toolbar
         self.main_toolbar = QToolBar("Main Toolbar")
         self.main_toolbar.setIconSize(QSize(20, 20))
@@ -1045,6 +1075,148 @@ class RandomImageViewer(QMainWindow):
 
         self.update_image_info()
         self._update_title()
+        
+        # Add global shortcuts that bypass normal event handling
+        self.setup_global_shortcuts()
+        
+        # Initialize toggle button states
+        self._update_enhancement_menu_states()
+        if hasattr(self, 'grayscale_toggle_btn'):
+            self.grayscale_toggle_btn.setChecked(self.grayscale_value > 0)
+        if hasattr(self, 'contrast_toggle_btn'):
+            self.contrast_toggle_btn.setChecked(self.contrast_value != 50)
+        if hasattr(self, 'gamma_toggle_btn'):
+            self.gamma_toggle_btn.setChecked(self.gamma_value != 0)
+
+    def create_menu_bar(self):
+        """Create menu bar with essential shortcuts"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu('&File')
+        
+        # Open folder
+        open_action = QAction('&Open Folder...', self)
+        open_action.setShortcut('Ctrl+O')
+        open_action.triggered.connect(self.choose_folder)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        # Exit
+        exit_action = QAction('E&xit', self)
+        exit_action.setShortcut('Alt+F4')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # View menu
+        view_menu = menubar.addMenu('&View')
+        
+        # Fullscreen toggle
+        self.fullscreen_action = QAction('&Fullscreen', self)
+        self.fullscreen_action.setShortcut('F11')
+        self.fullscreen_action.setCheckable(True)
+        self.fullscreen_action.triggered.connect(self.menu_toggle_fullscreen)
+        view_menu.addAction(self.fullscreen_action)
+        
+        # Force exit fullscreen
+        force_exit_action = QAction('Force Exit Fullscreen', self)
+        force_exit_action.setShortcut('Ctrl+Esc')
+        force_exit_action.triggered.connect(self.force_exit_fullscreen)
+        view_menu.addAction(force_exit_action)
+        
+        view_menu.addSeparator()
+        
+        # Zoom actions
+        zoom_in_action = QAction('Zoom &In', self)
+        zoom_in_action.setShortcut('Ctrl++')
+        zoom_in_action.triggered.connect(self.zoom_in)
+        view_menu.addAction(zoom_in_action)
+        
+        zoom_out_action = QAction('Zoom &Out', self)
+        zoom_out_action.setShortcut('Ctrl+-')
+        zoom_out_action.triggered.connect(self.zoom_out)
+        view_menu.addAction(zoom_out_action)
+        
+        reset_zoom_action = QAction('&Reset Zoom', self)
+        reset_zoom_action.setShortcut('Ctrl+0')
+        reset_zoom_action.triggered.connect(self.reset_zoom)
+        view_menu.addAction(reset_zoom_action)
+        
+        # Enhancement menu
+        enhancement_menu = menubar.addMenu('&Enhancement')
+        
+        # Grayscale toggle
+        self.grayscale_menu_action = QAction('&Grayscale', self)
+        self.grayscale_menu_action.setCheckable(True)
+        self.grayscale_menu_action.triggered.connect(lambda: self.toggle_grayscale(self.grayscale_value == 0))
+        enhancement_menu.addAction(self.grayscale_menu_action)
+        
+        # Contrast toggle
+        self.contrast_menu_action = QAction('Enhanced &Contrast', self)
+        self.contrast_menu_action.setCheckable(True)
+        self.contrast_menu_action.triggered.connect(self.toggle_contrast)
+        enhancement_menu.addAction(self.contrast_menu_action)
+        
+        # Gamma toggle
+        self.gamma_menu_action = QAction('Enhanced Brigh&tness', self)
+        self.gamma_menu_action.setCheckable(True)
+        self.gamma_menu_action.triggered.connect(self.toggle_gamma)
+        enhancement_menu.addAction(self.gamma_menu_action)
+        
+        enhancement_menu.addSeparator()
+        
+        # Reset enhancements
+        reset_enhancements_action = QAction('&Reset All Enhancements', self)
+        reset_enhancements_action.setShortcut('Ctrl+R')
+        reset_enhancements_action.triggered.connect(self.reset_enhancements)
+        enhancement_menu.addAction(reset_enhancements_action)
+
+    def menu_toggle_fullscreen(self):
+        """Toggle fullscreen from menu (no parameters)"""
+        print("Menu fullscreen toggle triggered")
+        self.toggle_fullscreen()
+        # Update menu action state
+        self.fullscreen_action.setChecked(self.is_fullscreen)
+
+    def setup_global_shortcuts(self):
+        """Setup global shortcuts that work even when focus is elsewhere"""
+        print("Setting up global shortcuts...")
+        
+        # Emergency exit fullscreen shortcuts
+        self.escape_shortcut = QShortcut("Esc", self)
+        self.escape_shortcut.activated.connect(self.emergency_exit_fullscreen)
+        
+        self.f11_shortcut = QShortcut("F11", self)
+        self.f11_shortcut.activated.connect(self.emergency_toggle_fullscreen)
+        
+        self.ctrl_esc_shortcut = QShortcut("Ctrl+Esc", self)
+        self.ctrl_esc_shortcut.activated.connect(self.force_exit_fullscreen)
+        
+        # Alt+F4 as ultimate emergency exit
+        self.alt_f4_shortcut = QShortcut("Alt+F4", self)
+        self.alt_f4_shortcut.activated.connect(self.emergency_close)
+        
+        print("Global shortcuts set up successfully")
+
+    def emergency_exit_fullscreen(self):
+        """Emergency exit from fullscreen"""
+        print("EMERGENCY: Escape shortcut activated")
+        if self.is_fullscreen:
+            self.force_exit_fullscreen()
+
+    def emergency_toggle_fullscreen(self):
+        """Emergency toggle fullscreen"""
+        print("EMERGENCY: F11 shortcut activated")
+        if self.is_fullscreen:
+            self.force_exit_fullscreen()
+        else:
+            self.toggle_fullscreen(True)
+
+    def emergency_close(self):
+        """Emergency close application"""
+        print("EMERGENCY: Alt+F4 activated - closing application")
+        self.close()
 
     def _setup_main_toolbar(self):
         toolbar = self.main_toolbar
@@ -1126,6 +1298,36 @@ class RandomImageViewer(QMainWindow):
         spacer.setFixedWidth(4)
         toolbar.addWidget(spacer)
 
+        # Line color picker button
+        self.line_color_btn = QToolButton()
+        self.line_color_btn.setText("🎨")
+        self.line_color_btn.setToolTip("Choose Line Color")
+        self.line_color_btn.setFixedSize(24, 24)
+        self.line_color_btn.clicked.connect(self.choose_line_color)
+        # Set initial background color to show current color
+        self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border: 1px solid #666; }}")
+        toolbar.addWidget(self.line_color_btn)
+
+        # Quick color preset buttons
+        colors = [
+            ("#ffffff", "White", "⚪"),
+            ("#000000", "Black", "⚫"),
+            ("#808080", "Grey", "⚪"),
+        ]
+        
+        for color_hex, color_name, emoji in colors:
+            color_btn = QToolButton()
+            color_btn.setText(emoji)
+            color_btn.setToolTip(f"Set Line Color to {color_name}")
+            color_btn.setFixedSize(18, 24)  # Slightly smaller for presets
+            color_btn.clicked.connect(lambda checked, c=color_hex: self.set_line_color(c))
+            color_btn.setStyleSheet(f"QToolButton {{ border: 1px solid #444; margin: 1px; }}")
+            toolbar.addWidget(color_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
         # Clear lines button
         clear_lines_btn = QToolButton()
         clear_lines_btn.setText("🗑")
@@ -1133,6 +1335,46 @@ class RandomImageViewer(QMainWindow):
         clear_lines_btn.setFixedSize(24, 24)
         clear_lines_btn.clicked.connect(self.clear_lines)
         toolbar.addWidget(clear_lines_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(8)
+        toolbar.addWidget(spacer)
+
+        # Enhancement toggle buttons
+        # Grayscale toggle button
+        self.grayscale_toggle_btn = QToolButton()
+        self.grayscale_toggle_btn.setText("🌑")  # Moon icon for grayscale
+        self.grayscale_toggle_btn.setToolTip("Toggle Grayscale On/Off")
+        self.grayscale_toggle_btn.setCheckable(True)
+        self.grayscale_toggle_btn.setFixedSize(24, 24)
+        self.grayscale_toggle_btn.toggled.connect(self.toggle_grayscale)
+        toolbar.addWidget(self.grayscale_toggle_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Contrast toggle button  
+        self.contrast_toggle_btn = QToolButton()
+        self.contrast_toggle_btn.setText("🔆")  # Sun with rays for contrast
+        self.contrast_toggle_btn.setToolTip("Toggle Enhanced Contrast On/Off")
+        self.contrast_toggle_btn.setCheckable(True)
+        self.contrast_toggle_btn.setFixedSize(24, 24)
+        self.contrast_toggle_btn.toggled.connect(self.toggle_contrast)
+        toolbar.addWidget(self.contrast_toggle_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Gamma/brightness toggle button
+        self.gamma_toggle_btn = QToolButton()
+        self.gamma_toggle_btn.setText("💡")  # Light bulb for brightness/gamma
+        self.gamma_toggle_btn.setToolTip("Toggle Enhanced Brightness On/Off")
+        self.gamma_toggle_btn.setCheckable(True)
+        self.gamma_toggle_btn.setFixedSize(24, 24)
+        self.gamma_toggle_btn.toggled.connect(self.toggle_gamma)
+        toolbar.addWidget(self.gamma_toggle_btn)
 
         spacer = QWidget()
         spacer.setFixedWidth(8)
@@ -1424,15 +1666,6 @@ class RandomImageViewer(QMainWindow):
         self.always_on_top_btn.toggled.connect(self.toggle_always_on_top)
         toolbar.addWidget(self.always_on_top_btn)
 
-        # Grayscale mode button
-        self.grayscale_btn = QToolButton()
-        self.grayscale_btn.setText("⚪")  # Changed from ⚫ to ⚪ for better visibility on dark background
-        self.grayscale_btn.setToolTip("Toggle Grayscale (Black & White)")
-        self.grayscale_btn.setCheckable(True)
-        self.grayscale_btn.setFixedSize(24, 24)
-        self.grayscale_btn.toggled.connect(self.toggle_grayscale)
-        toolbar.addWidget(self.grayscale_btn)
-
     def _create_enhancement_widgets_on_toolbar(self, toolbar):
         """Create enhancement widgets on the specified toolbar"""
         # Add some spacing before the enhancement controls
@@ -1489,12 +1722,12 @@ class RandomImageViewer(QMainWindow):
         toolbar.addWidget(gamma_label)
         
         self.gamma_slider = ClickableSlider(Qt.Horizontal)
-        self.gamma_slider.setRange(-500, 500)
+        self.gamma_slider.setRange(-200, 500)  # New range: -200=very dark, 0=normal, 500=very bright
         self.gamma_slider.setValue(self.gamma_value)
         self.gamma_slider.setFixedWidth(70)  # Increased width for easier clicking
         self.gamma_slider.setFixedHeight(24)  # Increased height for easier clicking
         self.gamma_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
-        self.gamma_slider.setToolTip("Gamma: 0=Normal, -500=Very Dark, +500=Very Bright")
+        self.gamma_slider.setToolTip("Gamma: -200=Very Dark, 0=Normal, 500=Very Bright")
         self.gamma_slider.valueChanged.connect(self.update_gamma)
         toolbar.addWidget(self.gamma_slider)
 
@@ -1594,7 +1827,7 @@ class RandomImageViewer(QMainWindow):
                 self._manage_cache(self.pixmap_cache, img_path, base_pixmap)
             
             # Apply enhancements only if needed
-            if self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 50:
+            if self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 0:
                 pixmap = self.apply_fast_enhancements(base_pixmap.copy())
             else:
                 pixmap = base_pixmap
@@ -1634,8 +1867,8 @@ class RandomImageViewer(QMainWindow):
             painter = QPainter(final_pixmap)
             painter.setRenderHint(QPainter.Antialiasing, False)
             
-            # Use white color and user-selected thickness
-            pen_color = QColor("#ffffff")
+            # Use user-selected color and thickness
+            pen_color = self.line_color
             pen_thickness = self.line_thickness
             painter.setPen(QPen(pen_color, pen_thickness, Qt.SolidLine))
             
@@ -2254,6 +2487,26 @@ class RandomImageViewer(QMainWindow):
         if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
             self.display_image(self.current_image)
 
+    def choose_line_color(self):
+        """Open color picker dialog to choose line color"""
+        color = QColorDialog.getColor(self.line_color, self, "Choose Line Color")
+        if color.isValid():
+            self.line_color = color
+            # Update button background to show selected color
+            self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border: 1px solid #666; }}")
+            # Redraw current image with new color if there are lines
+            if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+                self.display_image(self.current_image)
+
+    def set_line_color(self, color_hex):
+        """Set line color from hex string (used by preset color buttons)"""
+        self.line_color = QColor(color_hex)
+        # Update main color button background to show selected color
+        self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border: 1px solid #666; }}")
+        # Redraw current image with new color if there are lines
+        if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            self.display_image(self.current_image)
+
     def add_line(self, x_position):
         if x_position not in self.drawn_lines:
             self.drawn_lines.append(x_position)
@@ -2338,68 +2591,261 @@ class RandomImageViewer(QMainWindow):
         self._update_title()  # Update title to reflect always on top status
         self.show()  # Necessary to apply the window flag change immediately
 
-    def toggle_fullscreen(self, checked):
-        """Toggle fullscreen mode"""
-        self.is_fullscreen = checked
+    def toggle_fullscreen(self, checked=None):
+        """Toggle fullscreen mode with enhanced error handling"""
+        # If no parameter provided, toggle current state
+        if checked is None:
+            checked = not self.is_fullscreen
+            
+        print(f"toggle_fullscreen called with checked={checked}, current state={self.is_fullscreen}")
         
-        if checked:
-            # Store current geometry before going fullscreen
-            self.normal_geometry = self.geometry()
-            self.showFullScreen()
-            self.status.showMessage("Fullscreen mode enabled - Press F11 or Esc to exit")
-        else:
-            # Restore normal window
+        try:
+            if checked and not self.is_fullscreen:
+                # Entering fullscreen
+                print("Entering fullscreen mode...")
+                self.normal_geometry = self.geometry()
+                print(f"Stored geometry: {self.normal_geometry}")
+                
+                # Hide menu bar and status bar in fullscreen
+                if hasattr(self, 'menuBar'):
+                    self.menuBar().hide()
+                self.statusBar().hide()
+                
+                # Use Qt's fullscreen method
+                self.setWindowState(Qt.WindowFullScreen)
+                self.showFullScreen()
+                
+                self.is_fullscreen = True
+                self.activateWindow()
+                self.raise_()
+                self.setFocus()
+                self.status.showMessage("FULLSCREEN MODE - Press Alt+F4 to exit, or Esc")
+                
+            elif not checked and self.is_fullscreen:
+                # Exiting fullscreen
+                print("Exiting fullscreen mode...")
+                
+                # Show menu bar and status bar again
+                if hasattr(self, 'menuBar'):
+                    self.menuBar().show()
+                self.statusBar().show()
+                
+                # Exit fullscreen using multiple methods
+                self.setWindowState(Qt.WindowNoState)
+                self.showNormal()
+                
+                if self.normal_geometry and self.normal_geometry.isValid():
+                    print(f"Restoring geometry: {self.normal_geometry}")
+                    self.setGeometry(self.normal_geometry)
+                else:
+                    print("Using default geometry")
+                    self.resize(950, 650)
+                    self.move(100, 100)
+                
+                self.is_fullscreen = False
+                self.activateWindow()
+                self.raise_()
+                self.setFocus()
+                self.status.showMessage("Fullscreen mode disabled")
+            
+            # Update button state
+            if hasattr(self, 'fullscreen_btn'):
+                self.fullscreen_btn.blockSignals(True)
+                self.fullscreen_btn.setChecked(self.is_fullscreen)
+                self.fullscreen_btn.blockSignals(False)
+                
+            print(f"Fullscreen toggle complete. New state: {self.is_fullscreen}")
+            
+        except Exception as e:
+            print(f"Error in toggle_fullscreen: {e}")
+            # Fallback: force exit
+            self.force_exit_fullscreen()
+
+    def exit_fullscreen(self):
+        """Explicitly exit fullscreen mode"""
+        print("exit_fullscreen called")
+        if self.is_fullscreen:
+            self.toggle_fullscreen(False)
+
+    def force_exit_fullscreen(self):
+        """Force exit fullscreen mode using multiple methods"""
+        print("force_exit_fullscreen called - using all available methods")
+        
+        try:
+            # Method 1: Set state and use showNormal
+            self.is_fullscreen = False
             self.showNormal()
-            if self.normal_geometry:
+            
+            # Method 2: Try setWindowState
+            self.setWindowState(Qt.WindowNoState)
+            
+            # Method 3: Windows-specific API call (if available)
+            if os.name == "nt" and ctypes:
+                try:
+                    # Get window handle
+                    hwnd = int(self.winId())
+                    # Force window to normal state using Windows API
+                    ctypes.windll.user32.ShowWindow(hwnd, 1)  # SW_SHOWNORMAL = 1
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    print("Used Windows API to force normal window state")
+                except Exception as e:
+                    print(f"Windows API call failed: {e}")
+            
+            # Method 4: Show menu bar and status bar
+            if hasattr(self, 'menuBar'):
+                self.menuBar().show()
+            self.statusBar().show()
+            
+            # Method 5: Restore geometry if available
+            if self.normal_geometry and self.normal_geometry.isValid():
+                print(f"Force restoring geometry: {self.normal_geometry}")
                 self.setGeometry(self.normal_geometry)
-            self.status.showMessage("Fullscreen mode disabled")
-        
-        # Update button state
-        self.fullscreen_btn.setChecked(checked)
+            else:
+                print("No stored geometry, using default size")
+                self.resize(950, 650)
+                self.move(100, 100)
+            
+            # Method 6: Force window focus and update
+            self.activateWindow()
+            self.raise_()
+            self.setFocus()
+            self.update()
+            self.repaint()
+            
+            # Update button states
+            if hasattr(self, 'fullscreen_btn'):
+                self.fullscreen_btn.blockSignals(True)
+                self.fullscreen_btn.setChecked(False)
+                self.fullscreen_btn.blockSignals(False)
+                
+            if hasattr(self, 'fullscreen_action'):
+                self.fullscreen_action.setChecked(False)
+            
+            self.status.showMessage("Fullscreen mode force exited")
+            print(f"Force exit complete. Window state: {self.windowState()}")
+            
+        except Exception as e:
+            print(f"Error in force_exit_fullscreen: {e}")
+            # Last resort: try to close and restart
+            print("Last resort: attempting emergency close...")
+            self.close()
 
     def toggle_grayscale(self, checked):
         self.grayscale_value = 100 if checked else 0
         self.grayscale_slider.setValue(self.grayscale_value)
+        # Update toggle button state
+        if hasattr(self, 'grayscale_toggle_btn'):
+            self.grayscale_toggle_btn.setChecked(checked)
         # Clear caches and force immediate update
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
+        self._update_enhancement_menu_states()
         if self.current_image:
             self.display_image(self.current_image)
 
+    def toggle_contrast(self, checked=None):
+        """Toggle contrast between normal (50) and enhanced (100)"""
+        if checked is None:
+            # Toggle between current and normal
+            self.contrast_value = 50 if self.contrast_value != 50 else 100
+            checked = self.contrast_value != 50
+        else:
+            # Set based on checked state
+            self.contrast_value = 100 if checked else 50
+        self.contrast_slider.setValue(self.contrast_value)
+        # Update toggle button state
+        if hasattr(self, 'contrast_toggle_btn'):
+            self.contrast_toggle_btn.setChecked(checked)
+        # Clear caches and force immediate update
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        self._update_enhancement_menu_states()
+        if self.current_image:
+            self.display_image(self.current_image)
+
+    def toggle_gamma(self, checked=None):
+        """Toggle gamma between normal (0) and enhanced (100)"""
+        if checked is None:
+            # Toggle between current and normal
+            self.gamma_value = 0 if self.gamma_value != 0 else 100
+            checked = self.gamma_value != 0
+        else:
+            # Set based on checked state
+            self.gamma_value = 100 if checked else 0
+        self.gamma_slider.setValue(self.gamma_value)
+        # Update toggle button state
+        if hasattr(self, 'gamma_toggle_btn'):
+            self.gamma_toggle_btn.setChecked(checked)
+        # Clear caches and force immediate update
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        self._update_enhancement_menu_states()
+        if self.current_image:
+            self.display_image(self.current_image)
+
+    def _update_enhancement_menu_states(self):
+        """Update the checked state of enhancement menu actions"""
+        if hasattr(self, 'grayscale_menu_action'):
+            self.grayscale_menu_action.setChecked(self.grayscale_value > 0)
+        if hasattr(self, 'contrast_menu_action'):
+            self.contrast_menu_action.setChecked(self.contrast_value != 50)
+        if hasattr(self, 'gamma_menu_action'):
+            self.gamma_menu_action.setChecked(self.gamma_value != 0)
+
     def update_grayscale(self, value):
         self.grayscale_value = value
+        # Update toggle button state
+        if hasattr(self, 'grayscale_toggle_btn'):
+            self.grayscale_toggle_btn.setChecked(value > 0)
         # Clear enhancement cache when settings change
         self.enhancement_cache.clear()
         self.scaled_cache.clear()  # Also clear scaled cache to force refresh
+        self._update_enhancement_menu_states()
         if self.current_image:
             self.display_image(self.current_image)
 
     def update_contrast(self, value):
         self.contrast_value = value
+        # Update toggle button state
+        if hasattr(self, 'contrast_toggle_btn'):
+            self.contrast_toggle_btn.setChecked(value != 50)
         # Clear enhancement cache when settings change
         self.enhancement_cache.clear()
         self.scaled_cache.clear()  # Also clear scaled cache to force refresh
+        self._update_enhancement_menu_states()
         if self.current_image:
             self.display_image(self.current_image)
 
     def update_gamma(self, value):
         self.gamma_value = value
+        # Update toggle button state
+        if hasattr(self, 'gamma_toggle_btn'):
+            self.gamma_toggle_btn.setChecked(value != 50)
         # Clear enhancement cache when settings change
         self.enhancement_cache.clear()
         self.scaled_cache.clear()  # Also clear scaled cache to force refresh
+        self._update_enhancement_menu_states()
         if self.current_image:
             self.display_image(self.current_image)
 
     def reset_enhancements(self):
         self.grayscale_slider.setValue(0)
         self.contrast_slider.setValue(50)
-        self.gamma_slider.setValue(50)
+        self.gamma_slider.setValue(0)
         self.grayscale_value = 0
         self.contrast_value = 50
-        self.gamma_value = 50
+        self.gamma_value = 0
+        # Update toggle button states
+        if hasattr(self, 'grayscale_toggle_btn'):
+            self.grayscale_toggle_btn.setChecked(False)
+        if hasattr(self, 'contrast_toggle_btn'):
+            self.contrast_toggle_btn.setChecked(False)
+        if hasattr(self, 'gamma_toggle_btn'):
+            self.gamma_toggle_btn.setChecked(False)
         # Clear all caches when resetting
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
+        self._update_enhancement_menu_states()
         if self.current_image:
             self.display_image(self.current_image)
 
@@ -2493,17 +2939,27 @@ class RandomImageViewer(QMainWindow):
             self.status.showMessage(f"Error copying to clipboard: {str(e)}")
 
     def keyPressEvent(self, event):
+        """Handle key press events with robust fullscreen exit"""
+        # Debug print to help troubleshoot
+        print(f"Key pressed: {event.key()}, Fullscreen: {self.is_fullscreen}")
+        
         if event.key() == Qt.Key_Left:
             self.show_previous_image()
         elif event.key() == Qt.Key_Right:
             self.show_next_image()
         elif event.key() == Qt.Key_F11:
             # Toggle fullscreen mode
-            self.toggle_fullscreen(not self.is_fullscreen)
+            print("F11 pressed - toggling fullscreen")
+            self.toggle_fullscreen()
         elif event.key() == Qt.Key_Escape:
-            # Exit fullscreen if in fullscreen mode
+            # Always try to exit fullscreen on Escape
             if self.is_fullscreen:
-                self.toggle_fullscreen(False)
+                print("Escape pressed - exiting fullscreen")
+                if event.modifiers() & Qt.ControlModifier:
+                    print("Ctrl+Esc pressed - force exiting fullscreen")
+                    self.force_exit_fullscreen()
+                else:
+                    self.exit_fullscreen()
             else:
                 super().keyPressEvent(event)
         elif event.modifiers() & Qt.ControlModifier:
@@ -2517,10 +2973,25 @@ class RandomImageViewer(QMainWindow):
                 self.flip_horizontal()
             elif event.key() == Qt.Key_V:
                 self.flip_vertical()
+            elif event.key() == Qt.Key_R:
+                # Reset all enhancements
+                self.reset_enhancements()
             else:
                 super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Handle double-click events - exit fullscreen if in fullscreen mode"""
+        if self.is_fullscreen:
+            print("Double-click detected - exiting fullscreen")
+            self.exit_fullscreen()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def closeEvent(self, event):
+        """Handle window close event"""
+        super().closeEvent(event)
 
     def showEvent(self, event):
         """Override showEvent to ensure dark title bar is applied"""
