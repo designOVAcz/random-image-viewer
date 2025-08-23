@@ -226,9 +226,9 @@ QPushButton, QToolButton {
     padding: 0 2px;
 }
 QPushButton:hover, QToolButton:hover { background: #2e3034; }
-QPushButton:checked, QToolButton:checked { background: #3b7dd8; color: #fff; }
+QPushButton:checked, QToolButton:checked { background: #424242; color: #fff; }
 QListWidget::item:selected { background: #354e6e; color: #fff; }
-QCheckBox:checked { color: #3b7dd8; }
+QCheckBox:checked { color: #424242; }
 QSlider::groove:horizontal {
     background: #35383b;
     height: 6px;
@@ -242,14 +242,14 @@ QSlider::handle:horizontal {
     margin: -4px 0;
 }
 QSlider::handle:horizontal:hover {
-    background: #3b7dd8;
+    background: #424242;
 }
 QSpinBox {
     background: #35383b;
     border: 1px solid #4a4d50;
     border-radius: 3px;
     padding: 2px;
-    selection-background-color: #3b7dd8;
+    selection-background-color: #424242;
 }
 QToolBar::separator {
     background: #35383b;
@@ -270,7 +270,7 @@ QMenu::item {
     background: transparent;
 }
 QMenu::item:selected {
-    background: #3b7dd8;
+    background: #424242;
     color: #fff;
 }
 QMenu::separator {
@@ -973,6 +973,7 @@ class RandomImageViewer(QMainWindow):
         self.drawn_horizontal_lines = []  # List of y positions for horizontal lines
         self.drawn_free_lines = []  # List of free lines, each with start and end points
         self.current_line_start = None  # Store first click point for free line
+        self.lines_visible = True  # New: Toggle line visibility
         self.line_thickness = 1
         self.line_color = QColor("#242424")  # Default white color for lines
 
@@ -1258,6 +1259,20 @@ class RandomImageViewer(QMainWindow):
         clear_lines_btn.setFixedSize(24, 24)
         clear_lines_btn.clicked.connect(self.clear_lines)
         toolbar.addWidget(clear_lines_btn)
+
+        spacer = QWidget()
+        spacer.setFixedWidth(4)
+        toolbar.addWidget(spacer)
+
+        # Toggle line visibility button
+        self.toggle_lines_btn = QToolButton()
+        self.toggle_lines_btn.setText("👁")  # Eye icon for visibility
+        self.toggle_lines_btn.setToolTip("Toggle Line Visibility On/Off")
+        self.toggle_lines_btn.setCheckable(True)
+        self.toggle_lines_btn.setChecked(True)  # Lines visible by default
+        self.toggle_lines_btn.setFixedSize(24, 24)
+        self.toggle_lines_btn.toggled.connect(self.toggle_line_visibility)
+        toolbar.addWidget(self.toggle_lines_btn)
 
         spacer = QWidget()
         spacer.setFixedWidth(8)
@@ -1790,8 +1805,8 @@ class RandomImageViewer(QMainWindow):
         # Scale FIRST, then draw lines on the scaled version
         scaled_pixmap = self._scale_pixmap(pixmap, img_path)
         
-        # Draw lines on the scaled pixmap if any exist
-        if self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines:
+        # Draw lines on the scaled pixmap if any exist AND lines are visible
+        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
             final_pixmap = scaled_pixmap.copy()
             painter = QPainter(final_pixmap)
             painter.setRenderHint(QPainter.Antialiasing, False)
@@ -2539,6 +2554,23 @@ class RandomImageViewer(QMainWindow):
             self.status.showMessage("Removed last line")
         else:
             self.status.showMessage("No lines to remove")
+
+    def toggle_line_visibility(self, checked):
+        """Toggle visibility of all drawn lines"""
+        self.lines_visible = checked
+        # Update button appearance
+        if hasattr(self, 'toggle_lines_btn'):
+            self.toggle_lines_btn.setText("👁" if checked else "🙈")  # Eye open/closed
+            self.toggle_lines_btn.setToolTip("Hide Lines" if checked else "Show Lines")
+        
+        # Redraw current image to show/hide lines
+        if self.current_image:
+            self.display_image(self.current_image)
+        
+        # Update status message
+        status_msg = "Lines shown" if checked else "Lines hidden"
+        if self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines:
+            self.status.showMessage(status_msg)
 
     def toggle_always_on_top(self, checked):
         self.always_on_top = checked
