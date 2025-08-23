@@ -1005,9 +1005,6 @@ class RandomImageViewer(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        # Create menu bar with essential shortcuts
-        self.create_menu_bar()
-        
         # Create main toolbar
         self.main_toolbar = QToolBar("Main Toolbar")
         self.main_toolbar.setIconSize(QSize(20, 20))
@@ -1088,97 +1085,6 @@ class RandomImageViewer(QMainWindow):
         if hasattr(self, 'gamma_toggle_btn'):
             self.gamma_toggle_btn.setChecked(self.gamma_value != 0)
 
-    def create_menu_bar(self):
-        """Create menu bar with essential shortcuts"""
-        menubar = self.menuBar()
-        
-        # File menu
-        file_menu = menubar.addMenu('&File')
-        
-        # Open folder
-        open_action = QAction('&Open Folder...', self)
-        open_action.setShortcut('Ctrl+O')
-        open_action.triggered.connect(self.choose_folder)
-        file_menu.addAction(open_action)
-        
-        file_menu.addSeparator()
-        
-        # Exit
-        exit_action = QAction('E&xit', self)
-        exit_action.setShortcut('Alt+F4')
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # View menu
-        view_menu = menubar.addMenu('&View')
-        
-        # Fullscreen toggle
-        self.fullscreen_action = QAction('&Fullscreen', self)
-        self.fullscreen_action.setShortcut('F11')
-        self.fullscreen_action.setCheckable(True)
-        self.fullscreen_action.triggered.connect(self.menu_toggle_fullscreen)
-        view_menu.addAction(self.fullscreen_action)
-        
-        # Force exit fullscreen
-        force_exit_action = QAction('Force Exit Fullscreen', self)
-        force_exit_action.setShortcut('Ctrl+Esc')
-        force_exit_action.triggered.connect(self.force_exit_fullscreen)
-        view_menu.addAction(force_exit_action)
-        
-        view_menu.addSeparator()
-        
-        # Zoom actions
-        zoom_in_action = QAction('Zoom &In', self)
-        zoom_in_action.setShortcut('Ctrl++')
-        zoom_in_action.triggered.connect(self.zoom_in)
-        view_menu.addAction(zoom_in_action)
-        
-        zoom_out_action = QAction('Zoom &Out', self)
-        zoom_out_action.setShortcut('Ctrl+-')
-        zoom_out_action.triggered.connect(self.zoom_out)
-        view_menu.addAction(zoom_out_action)
-        
-        reset_zoom_action = QAction('&Reset Zoom', self)
-        reset_zoom_action.setShortcut('Ctrl+0')
-        reset_zoom_action.triggered.connect(self.reset_zoom)
-        view_menu.addAction(reset_zoom_action)
-        
-        # Enhancement menu
-        enhancement_menu = menubar.addMenu('&Enhancement')
-        
-        # Grayscale toggle
-        self.grayscale_menu_action = QAction('&Grayscale', self)
-        self.grayscale_menu_action.setCheckable(True)
-        self.grayscale_menu_action.triggered.connect(lambda: self.toggle_grayscale(self.grayscale_value == 0))
-        enhancement_menu.addAction(self.grayscale_menu_action)
-        
-        # Contrast toggle
-        self.contrast_menu_action = QAction('Enhanced &Contrast', self)
-        self.contrast_menu_action.setCheckable(True)
-        self.contrast_menu_action.triggered.connect(self.toggle_contrast)
-        enhancement_menu.addAction(self.contrast_menu_action)
-        
-        # Gamma toggle
-        self.gamma_menu_action = QAction('Enhanced Brigh&tness', self)
-        self.gamma_menu_action.setCheckable(True)
-        self.gamma_menu_action.triggered.connect(self.toggle_gamma)
-        enhancement_menu.addAction(self.gamma_menu_action)
-        
-        enhancement_menu.addSeparator()
-        
-        # Reset enhancements
-        reset_enhancements_action = QAction('&Reset All Enhancements', self)
-        reset_enhancements_action.setShortcut('Ctrl+R')
-        reset_enhancements_action.triggered.connect(self.reset_enhancements)
-        enhancement_menu.addAction(reset_enhancements_action)
-
-    def menu_toggle_fullscreen(self):
-        """Toggle fullscreen from menu (no parameters)"""
-        print("Menu fullscreen toggle triggered")
-        self.toggle_fullscreen()
-        # Update menu action state
-        self.fullscreen_action.setChecked(self.is_fullscreen)
-
     def setup_global_shortcuts(self):
         """Setup global shortcuts that work even when focus is elsewhere"""
         print("Setting up global shortcuts...")
@@ -1196,6 +1102,23 @@ class RandomImageViewer(QMainWindow):
         # Alt+F4 as ultimate emergency exit
         self.alt_f4_shortcut = QShortcut("Alt+F4", self)
         self.alt_f4_shortcut.activated.connect(self.emergency_close)
+        
+        # Essential application shortcuts
+        self.ctrl_o_shortcut = QShortcut("Ctrl+O", self)
+        self.ctrl_o_shortcut.activated.connect(self.choose_folder)
+        
+        self.ctrl_r_shortcut = QShortcut("Ctrl+R", self)
+        self.ctrl_r_shortcut.activated.connect(self.reset_enhancements)
+        
+        # Zoom shortcuts
+        self.ctrl_plus_shortcut = QShortcut("Ctrl++", self)
+        self.ctrl_plus_shortcut.activated.connect(self.zoom_in)
+        
+        self.ctrl_minus_shortcut = QShortcut("Ctrl+-", self)
+        self.ctrl_minus_shortcut.activated.connect(self.zoom_out)
+        
+        self.ctrl_0_shortcut = QShortcut("Ctrl+0", self)
+        self.ctrl_0_shortcut.activated.connect(self.reset_zoom)
         
         print("Global shortcuts set up successfully")
 
@@ -2606,9 +2529,7 @@ class RandomImageViewer(QMainWindow):
                 self.normal_geometry = self.geometry()
                 print(f"Stored geometry: {self.normal_geometry}")
                 
-                # Hide menu bar and status bar in fullscreen
-                if hasattr(self, 'menuBar'):
-                    self.menuBar().hide()
+                # Hide status bar in fullscreen
                 self.statusBar().hide()
                 
                 # Use Qt's fullscreen method
@@ -2625,9 +2546,7 @@ class RandomImageViewer(QMainWindow):
                 # Exiting fullscreen
                 print("Exiting fullscreen mode...")
                 
-                # Show menu bar and status bar again
-                if hasattr(self, 'menuBar'):
-                    self.menuBar().show()
+                # Show status bar again
                 self.statusBar().show()
                 
                 # Exit fullscreen using multiple methods
@@ -2691,9 +2610,7 @@ class RandomImageViewer(QMainWindow):
                 except Exception as e:
                     print(f"Windows API call failed: {e}")
             
-            # Method 4: Show menu bar and status bar
-            if hasattr(self, 'menuBar'):
-                self.menuBar().show()
+            # Method 4: Show status bar
             self.statusBar().show()
             
             # Method 5: Restore geometry if available
@@ -2717,9 +2634,6 @@ class RandomImageViewer(QMainWindow):
                 self.fullscreen_btn.blockSignals(True)
                 self.fullscreen_btn.setChecked(False)
                 self.fullscreen_btn.blockSignals(False)
-                
-            if hasattr(self, 'fullscreen_action'):
-                self.fullscreen_action.setChecked(False)
             
             self.status.showMessage("Fullscreen mode force exited")
             print(f"Force exit complete. Window state: {self.windowState()}")
