@@ -958,8 +958,8 @@ class RandomImageViewer(QMainWindow):
 
         # Image enhancement parameters
         self.grayscale_value = 0  # 0 = color, 100 = full grayscale
-        self.contrast_value = 50  # 50 = normal, 0-100 range
-        self.gamma_value = 50     # 50 = normal, 0-100 range
+        self.contrast_value = 0  # 0 = normal, -500 to +500 range
+        self.gamma_value = 0     # 0 = normal, -500 to +500 range
         self.rotation_angle = 0   # Rotation angle in degrees
         self.flipped_h = False    # Horizontal flip state
         self.flipped_v = False    # Vertical flip state
@@ -1194,6 +1194,154 @@ class RandomImageViewer(QMainWindow):
         spacer.setFixedWidth(4)
         toolbar.addWidget(spacer)
 
+    def _setup_enhancement_controls(self):
+        """Setup the enhancement controls - put them on main toolbar initially"""
+        # Add a separator before enhancement controls for easy identification
+        self.enhancement_separator = self.main_toolbar.addSeparator()
+        
+        # Create enhancement controls on the main toolbar initially
+        self._create_enhancement_widgets_on_toolbar(self.main_toolbar)
+        
+        # Add action buttons to the main toolbar initially
+        self._add_action_buttons_to_toolbar(self.main_toolbar)
+
+        # History checkbox on main toolbar
+        self.show_history_checkbox = QCheckBox("History")
+        self.show_history_checkbox.setChecked(False)
+        self.show_history_checkbox.setFixedHeight(24)
+        self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
+        self.main_toolbar.addWidget(self.show_history_checkbox)
+
+        # Add stretch to push everything to the left
+        spacer_stretch = QWidget()
+        spacer_stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.main_toolbar.addWidget(spacer_stretch)
+
+    def _update_toolbar_layout(self, width):
+        """Move sliders between main toolbar and second row based on window width"""
+        should_use_two_rows = width < self.width_threshold
+        
+        # Only switch if the mode actually needs to change
+        if should_use_two_rows == self.two_row_mode:
+            return
+        
+        if should_use_two_rows and not self.two_row_mode:
+            print(f"Switching to two-row mode at width {width}")
+            
+            # Store current slider values and history checkbox state
+            gray_val = getattr(self, 'grayscale_slider', None)
+            gray_val = gray_val.value() if gray_val else self.grayscale_value
+            contrast_val = getattr(self, 'contrast_slider', None)
+            contrast_val = contrast_val.value() if contrast_val else self.contrast_value
+            gamma_val = getattr(self, 'gamma_slider', None)
+            gamma_val = gamma_val.value() if gamma_val else self.gamma_value
+            history_checked = getattr(self, 'show_history_checkbox', None)
+            history_checked = history_checked.isChecked() if history_checked else False
+            
+            # Find and remove enhancement widgets AND action buttons from main toolbar
+            actions_to_remove = []
+            found_separator = False
+            
+            for action in self.main_toolbar.actions():
+                if hasattr(self, 'enhancement_separator') and action == self.enhancement_separator:
+                    found_separator = True
+                    actions_to_remove.append(action)
+                elif found_separator:
+                    actions_to_remove.append(action)
+            
+            # Remove the actions
+            for action in actions_to_remove:
+                self.main_toolbar.removeAction(action)
+            
+            # Clear and setup slider toolbar with both sliders and action buttons
+            self.slider_toolbar.clear()
+            self._create_enhancement_widgets_on_toolbar(self.slider_toolbar)
+            
+            # Add spacer before action buttons
+            spacer_before_actions = QWidget()
+            spacer_before_actions.setFixedWidth(12)
+            self.slider_toolbar.addWidget(spacer_before_actions)
+            
+            # Add action buttons to second toolbar
+            self._add_action_buttons_to_toolbar(self.slider_toolbar)
+            
+            # Restore slider values
+            if hasattr(self, 'grayscale_slider'):
+                self.grayscale_slider.setValue(gray_val)
+                self.contrast_slider.setValue(contrast_val)
+                self.gamma_slider.setValue(gamma_val)
+            
+            # Add History checkbox to slider toolbar
+            spacer_before_history = QWidget()
+            spacer_before_history.setFixedWidth(8)
+            self.slider_toolbar.addWidget(spacer_before_history)
+            
+            self.show_history_checkbox = QCheckBox("History")
+            self.show_history_checkbox.setChecked(history_checked)
+            self.show_history_checkbox.setFixedHeight(24)
+            self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
+            self.slider_toolbar.addWidget(self.show_history_checkbox)
+            
+            # Show second toolbar and update mode
+            self.slider_toolbar.show()
+            self.two_row_mode = True
+            print("DEBUG: Second toolbar should now be visible")
+            print(f"DEBUG: Slider toolbar visible: {self.slider_toolbar.isVisible()}")
+            print(f"DEBUG: Slider toolbar widget count: {len([self.slider_toolbar.widgetForAction(a) for a in self.slider_toolbar.actions() if self.slider_toolbar.widgetForAction(a)])}")
+            
+            # Force update the UI
+            self.slider_toolbar.update()
+            self.repaint()
+            
+        elif not should_use_two_rows and self.two_row_mode:
+            print(f"Switching to single-row mode at width {width}")
+            
+            # Store current values
+            gray_val = getattr(self, 'grayscale_slider', None)
+            gray_val = gray_val.value() if gray_val else self.grayscale_value
+            contrast_val = getattr(self, 'contrast_slider', None)
+            contrast_val = contrast_val.value() if contrast_val else self.contrast_value
+            gamma_val = getattr(self, 'gamma_slider', None)
+            gamma_val = gamma_val.value() if gamma_val else self.gamma_value
+            history_checked = getattr(self, 'show_history_checkbox', None)
+            history_checked = history_checked.isChecked() if history_checked else False
+            
+            # Clear and hide slider toolbar
+            self.slider_toolbar.clear()
+            self.slider_toolbar.hide()
+            
+            # Re-add enhancement separator to main toolbar
+            self.enhancement_separator = self.main_toolbar.addSeparator()
+            
+            # Add enhancement controls back to main toolbar
+            self._create_enhancement_widgets_on_toolbar(self.main_toolbar)
+            
+            # Add action buttons back to main toolbar
+            self._add_action_buttons_to_toolbar(self.main_toolbar)
+            
+            # Restore values
+            if hasattr(self, 'grayscale_slider'):
+                self.grayscale_slider.setValue(gray_val)
+                self.contrast_slider.setValue(contrast_val)
+                self.gamma_slider.setValue(gamma_val)
+            
+            # Add History checkbox back to main toolbar
+            self.show_history_checkbox = QCheckBox("History")
+            self.show_history_checkbox.setChecked(history_checked)
+            self.show_history_checkbox.setFixedHeight(24)
+            self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
+            self.main_toolbar.addWidget(self.show_history_checkbox)
+            
+            # Add stretch to main toolbar
+            spacer_stretch = QWidget()
+            spacer_stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.main_toolbar.addWidget(spacer_stretch)
+            
+            self.two_row_mode = False
+            print("DEBUG: Returned to single-row mode")
+
+    def _add_action_buttons_to_toolbar(self, toolbar):
+        """Add action buttons (reset zoom, rotate, flip, etc.) to the specified toolbar"""
         # Reset zoom button
         self.reset_zoom_btn = QToolButton()
         self.reset_zoom_btn.setText("🔄")
@@ -1285,134 +1433,6 @@ class RandomImageViewer(QMainWindow):
         self.grayscale_btn.toggled.connect(self.toggle_grayscale)
         toolbar.addWidget(self.grayscale_btn)
 
-    def _setup_enhancement_controls(self):
-        """Setup the enhancement controls - put them on main toolbar initially"""
-        # Add a separator before enhancement controls for easy identification
-        self.enhancement_separator = self.main_toolbar.addSeparator()
-        
-        # Create enhancement controls on the main toolbar initially
-        self._create_enhancement_widgets_on_toolbar(self.main_toolbar)
-
-        # History checkbox on main toolbar
-        self.show_history_checkbox = QCheckBox("History")
-        self.show_history_checkbox.setChecked(False)
-        self.show_history_checkbox.setFixedHeight(24)
-        self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
-        self.main_toolbar.addWidget(self.show_history_checkbox)
-
-        # Add stretch to push everything to the left
-        spacer_stretch = QWidget()
-        spacer_stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.main_toolbar.addWidget(spacer_stretch)
-
-    def _update_toolbar_layout(self, width):
-        """Move sliders between main toolbar and second row based on window width"""
-        should_use_two_rows = width < self.width_threshold
-        
-        # Only switch if the mode actually needs to change
-        if should_use_two_rows == self.two_row_mode:
-            return
-        
-        if should_use_two_rows and not self.two_row_mode:
-            print(f"Switching to two-row mode at width {width}")
-            
-            # Store current slider values and history checkbox state
-            gray_val = getattr(self, 'grayscale_slider', None)
-            gray_val = gray_val.value() if gray_val else self.grayscale_value
-            contrast_val = getattr(self, 'contrast_slider', None)
-            contrast_val = contrast_val.value() if contrast_val else self.contrast_value
-            gamma_val = getattr(self, 'gamma_slider', None)
-            gamma_val = gamma_val.value() if gamma_val else self.gamma_value
-            history_checked = getattr(self, 'show_history_checkbox', None)
-            history_checked = history_checked.isChecked() if history_checked else False
-            
-            # Find and remove enhancement widgets from main toolbar
-            actions_to_remove = []
-            found_separator = False
-            
-            for action in self.main_toolbar.actions():
-                if hasattr(self, 'enhancement_separator') and action == self.enhancement_separator:
-                    found_separator = True
-                    actions_to_remove.append(action)
-                elif found_separator:
-                    actions_to_remove.append(action)
-            
-            # Remove the actions
-            for action in actions_to_remove:
-                self.main_toolbar.removeAction(action)
-            
-            # Clear and setup slider toolbar
-            self.slider_toolbar.clear()
-            self._create_enhancement_widgets_on_toolbar(self.slider_toolbar)
-            
-            # Restore slider values
-            if hasattr(self, 'grayscale_slider'):
-                self.grayscale_slider.setValue(gray_val)
-                self.contrast_slider.setValue(contrast_val)
-                self.gamma_slider.setValue(gamma_val)
-            
-            # Add History checkbox to slider toolbar
-            self.show_history_checkbox = QCheckBox("History")
-            self.show_history_checkbox.setChecked(history_checked)
-            self.show_history_checkbox.setFixedHeight(24)
-            self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
-            self.slider_toolbar.addWidget(self.show_history_checkbox)
-            
-            # Show second toolbar and update mode
-            self.slider_toolbar.show()
-            self.two_row_mode = True
-            print("DEBUG: Second toolbar should now be visible")
-            print(f"DEBUG: Slider toolbar visible: {self.slider_toolbar.isVisible()}")
-            print(f"DEBUG: Slider toolbar widget count: {len([self.slider_toolbar.widgetForAction(a) for a in self.slider_toolbar.actions() if self.slider_toolbar.widgetForAction(a)])}")
-            
-            # Force update the UI
-            self.slider_toolbar.update()
-            self.repaint()
-            
-        elif not should_use_two_rows and self.two_row_mode:
-            print(f"Switching to single-row mode at width {width}")
-            
-            # Store current values
-            gray_val = getattr(self, 'grayscale_slider', None)
-            gray_val = gray_val.value() if gray_val else self.grayscale_value
-            contrast_val = getattr(self, 'contrast_slider', None)
-            contrast_val = contrast_val.value() if contrast_val else self.contrast_value
-            gamma_val = getattr(self, 'gamma_slider', None)
-            gamma_val = gamma_val.value() if gamma_val else self.gamma_value
-            history_checked = getattr(self, 'show_history_checkbox', None)
-            history_checked = history_checked.isChecked() if history_checked else False
-            
-            # Clear and hide slider toolbar
-            self.slider_toolbar.clear()
-            self.slider_toolbar.hide()
-            
-            # Re-add enhancement separator to main toolbar
-            self.enhancement_separator = self.main_toolbar.addSeparator()
-            
-            # Add enhancement controls back to main toolbar
-            self._create_enhancement_widgets_on_toolbar(self.main_toolbar)
-            
-            # Restore values
-            if hasattr(self, 'grayscale_slider'):
-                self.grayscale_slider.setValue(gray_val)
-                self.contrast_slider.setValue(contrast_val)
-                self.gamma_slider.setValue(gamma_val)
-            
-            # Add History checkbox back to main toolbar
-            self.show_history_checkbox = QCheckBox("History")
-            self.show_history_checkbox.setChecked(history_checked)
-            self.show_history_checkbox.setFixedHeight(24)
-            self.show_history_checkbox.stateChanged.connect(self.toggle_history_panel)
-            self.main_toolbar.addWidget(self.show_history_checkbox)
-            
-            # Add stretch to main toolbar
-            spacer_stretch = QWidget()
-            spacer_stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self.main_toolbar.addWidget(spacer_stretch)
-            
-            self.two_row_mode = False
-            print("DEBUG: Returned to single-row mode")
-
     def _create_enhancement_widgets_on_toolbar(self, toolbar):
         """Create enhancement widgets on the specified toolbar"""
         # Add some spacing before the enhancement controls
@@ -1448,12 +1468,12 @@ class RandomImageViewer(QMainWindow):
         toolbar.addWidget(contrast_label)
         
         self.contrast_slider = ClickableSlider(Qt.Horizontal)
-        self.contrast_slider.setRange(0, 200)
+        self.contrast_slider.setRange(-500, 500)
         self.contrast_slider.setValue(self.contrast_value)
         self.contrast_slider.setFixedWidth(70)  # Increased width for easier clicking
         self.contrast_slider.setFixedHeight(24)  # Increased height for easier clicking
         self.contrast_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
-        self.contrast_slider.setToolTip("Contrast: 50=Normal, 0=Flat, 200=Extreme")
+        self.contrast_slider.setToolTip("Contrast: 0=Normal, -500=Flat, +500=Extreme")
         self.contrast_slider.valueChanged.connect(self.update_contrast)
         toolbar.addWidget(self.contrast_slider)
 
@@ -1469,12 +1489,12 @@ class RandomImageViewer(QMainWindow):
         toolbar.addWidget(gamma_label)
         
         self.gamma_slider = ClickableSlider(Qt.Horizontal)
-        self.gamma_slider.setRange(0, 200)
+        self.gamma_slider.setRange(-500, 500)
         self.gamma_slider.setValue(self.gamma_value)
         self.gamma_slider.setFixedWidth(70)  # Increased width for easier clicking
         self.gamma_slider.setFixedHeight(24)  # Increased height for easier clicking
         self.gamma_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
-        self.gamma_slider.setToolTip("Gamma: 50=Normal, 0=Very Dark, 200=Very Bright")
+        self.gamma_slider.setToolTip("Gamma: 0=Normal, -500=Very Dark, +500=Very Bright")
         self.gamma_slider.valueChanged.connect(self.update_gamma)
         toolbar.addWidget(self.gamma_slider)
 
@@ -1898,7 +1918,7 @@ class RandomImageViewer(QMainWindow):
                 pixmap = result
         
         # Apply contrast and gamma using fast QPainter effects instead of pixel manipulation
-        if self.contrast_value != 50 or self.gamma_value != 50:
+        if self.contrast_value != 0 or self.gamma_value != 0:
             # Create enhanced version using QPainter composition
             enhanced = QPixmap(pixmap.size())
             enhanced.fill(Qt.transparent)
@@ -1907,70 +1927,100 @@ class RandomImageViewer(QMainWindow):
             painter.setRenderHint(QPainter.Antialiasing)
             
             # Fast contrast approximation using opacity and blend modes
-            if self.contrast_value != 50:
-                # Extended range: 0-200, where 50 is normal
-                contrast_factor = (self.contrast_value - 50) / 50.0  # -1 to 3
+            if self.contrast_value != 0:
+                # Extended range: -500 to +500, where 0 is normal
+                contrast_factor = self.contrast_value / 100.0  # -5 to +5
                 
                 if contrast_factor > 0:
-                    # Increase contrast by overlay blending (can now go to extreme levels)
+                    # Increase contrast dramatically using multiple overlay passes
                     painter.drawPixmap(0, 0, pixmap)
                     painter.setCompositionMode(QPainter.CompositionMode_Overlay)
-                    # Scale the effect for the extended range
-                    opacity = min(1.0, contrast_factor * 0.7)  # Allow stronger effects
-                    painter.setOpacity(opacity)
+                    
+                    # Much stronger base effect - make it immediately noticeable
+                    base_opacity = min(1.0, abs(contrast_factor) * 0.8)  # Much stronger: 0.8 instead of 0.2
+                    painter.setOpacity(base_opacity)
                     painter.drawPixmap(0, 0, pixmap)
                     
-                    # For extreme contrast (>100), add additional overlay passes
-                    if self.contrast_value > 100:
-                        extra_passes = int((self.contrast_value - 100) / 50)
-                        for _ in range(min(extra_passes, 2)):  # Limit to 2 extra passes
-                            painter.setOpacity(0.3)
-                            painter.drawPixmap(0, 0, pixmap)
+                    # Add multiple passes for stronger effect even at low values
+                    num_passes = max(1, int(abs(contrast_factor) * 2))  # More passes for stronger effect
+                    for i in range(min(num_passes, 4)):  # Up to 4 passes
+                        painter.setOpacity(min(0.7, abs(contrast_factor) * 0.3))  # Much stronger passes
+                        painter.drawPixmap(0, 0, pixmap)
+                        
+                    # For extreme values, add even more dramatic effects
+                    if self.contrast_value > 300:
+                        painter.setCompositionMode(QPainter.CompositionMode_HardLight)
+                        painter.setOpacity(0.6)
+                        painter.drawPixmap(0, 0, pixmap)
                 else:
-                    # Decrease contrast by soft light blending
+                    # Decrease contrast much more dramatically
                     mid_gray = QPixmap(pixmap.size())
                     mid_gray.fill(QColor(128, 128, 128))  # 50% gray
                     
                     painter.drawPixmap(0, 0, pixmap)
                     painter.setCompositionMode(QPainter.CompositionMode_SoftLight)
-                    # Scale for extended low range
-                    opacity = min(1.0, abs(contrast_factor) * 0.6)
-                    painter.setOpacity(opacity)
+                    
+                    # Much stronger low contrast effect
+                    base_opacity = min(1.0, abs(contrast_factor) * 0.9)  # Much stronger: 0.9 instead of 0.2
+                    painter.setOpacity(base_opacity)
                     painter.drawPixmap(0, 0, mid_gray)
+                    
+                    # Add multiple gray overlay passes for very flat look
+                    num_passes = max(1, int(abs(contrast_factor) * 1.5))
+                    for i in range(min(num_passes, 3)):
+                        painter.setOpacity(min(0.8, abs(contrast_factor) * 0.4))
+                        painter.drawPixmap(0, 0, mid_gray)
             else:
                 painter.drawPixmap(0, 0, pixmap)
             
             # Fast gamma approximation using multiply blend
-            if self.gamma_value != 50:
-                # Extended range: 0-200, where 50 is normal  
-                gamma_factor = (self.gamma_value - 50) / 50.0  # -1 to 3
+            if self.gamma_value != 0:
+                # Extended range: -500 to +500, where 0 is normal  
+                gamma_factor = self.gamma_value / 100.0  # -5 to +5
                 
                 if gamma_factor > 0:
-                    # Brighten (simulate lower gamma) - can now go to extreme brightness
+                    # Brighten dramatically using multiple screen passes
                     painter.setCompositionMode(QPainter.CompositionMode_Screen)
-                    opacity = min(1.0, gamma_factor * 0.5)  # Allow stronger brightening
-                    painter.setOpacity(opacity)
+                    
+                    # Much stronger base brightening effect
+                    base_opacity = min(1.0, abs(gamma_factor) * 0.7)  # Much stronger: 0.7 instead of 0.2
+                    painter.setOpacity(base_opacity)
                     painter.drawPixmap(0, 0, pixmap)
                     
-                    # For extreme gamma (>100), add additional screen passes
-                    if self.gamma_value > 100:
-                        extra_passes = int((self.gamma_value - 100) / 50)
-                        for _ in range(min(extra_passes, 2)):  # Limit to 2 extra passes
-                            painter.setOpacity(0.4)
-                            painter.drawPixmap(0, 0, pixmap)
+                    # Add multiple screen passes for dramatic brightening even at low values
+                    num_passes = max(1, int(abs(gamma_factor) * 1.8))  # More passes
+                    for i in range(min(num_passes, 4)):  # Up to 4 passes
+                        painter.setOpacity(min(0.6, abs(gamma_factor) * 0.25))  # Much stronger passes
+                        painter.drawPixmap(0, 0, pixmap)
+                    
+                    # For extreme brightness, add color dodge for blown-out effect
+                    if self.gamma_value > 300:
+                        painter.setCompositionMode(QPainter.CompositionMode_ColorDodge)
+                        painter.setOpacity(0.4)
+                        painter.drawPixmap(0, 0, pixmap)
                 else:
-                    # Darken (simulate higher gamma) - can now go to extreme darkness
+                    # Darken dramatically using multiply with very dark overlays
                     painter.setCompositionMode(QPainter.CompositionMode_Multiply)
-                    opacity = min(1.0, abs(gamma_factor) * 0.6)  # Allow stronger darkening
-                    painter.setOpacity(opacity)
-                    painter.drawPixmap(0, 0, pixmap)
                     
-                    # For extreme low gamma (<25), add additional multiply passes
-                    if self.gamma_value < 25:
-                        extra_passes = int((25 - self.gamma_value) / 12)
-                        for _ in range(min(extra_passes, 2)):  # Limit to 2 extra passes
-                            painter.setOpacity(0.7)
-                            painter.drawPixmap(0, 0, pixmap)
+                    # Create much darker overlay for dramatic effect
+                    dark_overlay = QPixmap(pixmap.size())
+                    # Make it much darker: range from black to dark gray
+                    darkness_level = max(5, int(60 + gamma_factor * 40))  # Much darker range
+                    dark_overlay.fill(QColor(darkness_level, darkness_level, darkness_level))
+                    
+                    # Much stronger base darkening effect
+                    base_opacity = min(1.0, abs(gamma_factor) * 0.8)  # Much stronger: 0.8 instead of 0.2
+                    painter.setOpacity(base_opacity)
+                    painter.drawPixmap(0, 0, dark_overlay)
+                    
+                    # Add multiple dark overlay passes for very dark effect
+                    num_passes = max(1, int(abs(gamma_factor) * 1.5))
+                    for i in range(min(num_passes, 3)):
+                        # Use even darker overlay for additional passes
+                        very_dark = QPixmap(pixmap.size())
+                        very_dark.fill(QColor(20, 20, 20))  # Very dark overlay
+                        painter.setOpacity(min(0.7, abs(gamma_factor) * 0.3))
+                        painter.drawPixmap(0, 0, very_dark)
             
             painter.end()
             pixmap = enhanced
