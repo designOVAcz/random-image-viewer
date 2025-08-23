@@ -1624,12 +1624,12 @@ class RandomImageViewer(QMainWindow):
         toolbar.addWidget(contrast_label)
         
         self.contrast_slider = ClickableSlider(Qt.Horizontal)
-        self.contrast_slider.setRange(-500, 500)
+        self.contrast_slider.setRange(0, 200)
         self.contrast_slider.setValue(self.contrast_value)
         self.contrast_slider.setFixedWidth(70)  # Increased width for easier clicking
         self.contrast_slider.setFixedHeight(24)  # Increased height for easier clicking
         self.contrast_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
-        self.contrast_slider.setToolTip("Contrast: 0=Normal, -500=Flat, +500=Extreme")
+        self.contrast_slider.setToolTip("Contrast: 50=Normal, 0=Flat, 200=Extreme")
         self.contrast_slider.valueChanged.connect(self.update_contrast)
         toolbar.addWidget(self.contrast_slider)
 
@@ -1694,36 +1694,42 @@ class RandomImageViewer(QMainWindow):
         self.status.showMessage(info)
 
     def show_random_image(self):
-        if not self.images:
-            return
-        # Clear lines when showing a new random image
-        self.drawn_lines.clear()
-        self.drawn_horizontal_lines.clear()
-        self.drawn_free_lines.clear()
-        self.current_line_start = None
-        # Reset rotation angle and flips for new image
-        self.rotation_angle = 0
-        self.flipped_h = False
-        self.flipped_v = False
-        # Reset button states
-        if hasattr(self, 'flip_h_btn'):
-            self.flip_h_btn.setChecked(False)
-        if hasattr(self, 'flip_v_btn'):
-            self.flip_v_btn.setChecked(False)
-        available = [img for img in self.images if img not in self.history]
-        if not available:
-            self.history.clear()
-            self.history_list.clear()
-            available = self.images[:]
-        img_path = random.choice(available)
-        self.display_image(img_path)
-        self.add_to_history(img_path)
-        self.current_image = img_path
-        self.update_image_info(img_path)
-        self.set_status_path(img_path)
-        if self._auto_advance_active:
-            self.timer_remaining = self.timer_spin.value()
-            self._update_ring()
+        try:
+            if not self.images:
+                return
+            # Clear lines when showing a new random image
+            self.drawn_lines.clear()
+            self.drawn_horizontal_lines.clear()
+            self.drawn_free_lines.clear()
+            self.current_line_start = None
+            # Reset rotation angle and flips for new image
+            self.rotation_angle = 0
+            self.flipped_h = False
+            self.flipped_v = False
+            # Reset button states safely
+            if hasattr(self, 'flip_h_btn') and self.flip_h_btn is not None:
+                self.flip_h_btn.setChecked(False)
+            if hasattr(self, 'flip_v_btn') and self.flip_v_btn is not None:
+                self.flip_v_btn.setChecked(False)
+            available = [img for img in self.images if img not in self.history]
+            if not available:
+                self.history.clear()
+                self.history_list.clear()
+                available = self.images[:]
+            img_path = random.choice(available)
+            self.display_image(img_path)
+            self.add_to_history(img_path)
+            self.current_image = img_path
+            self.update_image_info(img_path)
+            self.set_status_path(img_path)
+            if self._auto_advance_active:
+                self.timer_remaining = self.timer_spin.value()
+                self._update_ring()
+        except Exception as e:
+            print(f"Error in show_random_image: {e}")
+            # Don't let the error crash the app, just log it
+            import traceback
+            traceback.print_exc()
 
     def _manual_next_image(self):
         self.show_random_image()
@@ -2042,146 +2048,154 @@ class RandomImageViewer(QMainWindow):
 
     def apply_fast_enhancements(self, pixmap):
         """Apply fast image enhancements using Qt's optimized color effects."""
-        if not pixmap or pixmap.isNull():
-            return pixmap
-            
-        # Fast grayscale conversion using Qt's built-in weighted average
-        if self.grayscale_value > 0:
-            # Create a grayscale version using Qt's optimized conversion
-            image = pixmap.toImage()
-            gray_image = image.convertToFormat(image.Format.Format_Grayscale8)
-            gray_pixmap = QPixmap.fromImage(gray_image)
-            
-            if self.grayscale_value == 100:
-                pixmap = gray_pixmap
-            else:
-                # Fast blend using Qt's composition modes
-                result = QPixmap(pixmap.size())
-                result.fill(Qt.transparent)
+        try:
+            if not pixmap or pixmap.isNull():
+                return pixmap
                 
-                painter = QPainter(result)
+            # Fast grayscale conversion using Qt's built-in weighted average
+            if self.grayscale_value > 0:
+                # Create a grayscale version using Qt's optimized conversion
+                image = pixmap.toImage()
+                gray_image = image.convertToFormat(image.Format.Format_Grayscale8)
+                gray_pixmap = QPixmap.fromImage(gray_image)
+                
+                if self.grayscale_value == 100:
+                    pixmap = gray_pixmap
+                else:
+                    # Fast blend using Qt's composition modes
+                    result = QPixmap(pixmap.size())
+                    result.fill(Qt.transparent)
+                    
+                    painter = QPainter(result)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    
+                    # Draw original image
+                    painter.setOpacity(1.0 - (self.grayscale_value / 100.0))
+                    painter.drawPixmap(0, 0, pixmap)
+                    
+                    # Draw grayscale overlay
+                    painter.setOpacity(self.grayscale_value / 100.0)
+                    painter.drawPixmap(0, 0, gray_pixmap)
+                    
+                    painter.end()
+                    pixmap = result
+            
+            # Apply contrast and gamma using fast QPainter effects instead of pixel manipulation
+            if self.contrast_value != 0 or self.gamma_value != 0:
+                # Create enhanced version using QPainter composition
+                enhanced = QPixmap(pixmap.size())
+                enhanced.fill(Qt.transparent)
+                
+                painter = QPainter(enhanced)
                 painter.setRenderHint(QPainter.Antialiasing)
                 
-                # Draw original image
-                painter.setOpacity(1.0 - (self.grayscale_value / 100.0))
-                painter.drawPixmap(0, 0, pixmap)
-                
-                # Draw grayscale overlay
-                painter.setOpacity(self.grayscale_value / 100.0)
-                painter.drawPixmap(0, 0, gray_pixmap)
-                
-                painter.end()
-                pixmap = result
-        
-        # Apply contrast and gamma using fast QPainter effects instead of pixel manipulation
-        if self.contrast_value != 0 or self.gamma_value != 0:
-            # Create enhanced version using QPainter composition
-            enhanced = QPixmap(pixmap.size())
-            enhanced.fill(Qt.transparent)
-            
-            painter = QPainter(enhanced)
-            painter.setRenderHint(QPainter.Antialiasing)
-            
-            # Fast contrast approximation using opacity and blend modes
-            if self.contrast_value != 0:
-                # Extended range: -500 to +500, where 0 is normal
-                contrast_factor = self.contrast_value / 100.0  # -5 to +5
-                
-                if contrast_factor > 0:
-                    # Increase contrast dramatically using multiple overlay passes
-                    painter.drawPixmap(0, 0, pixmap)
-                    painter.setCompositionMode(QPainter.CompositionMode_Overlay)
+                # Fast contrast approximation using opacity and blend modes
+                if self.contrast_value != 0:
+                    # Extended range: -500 to +500, where 0 is normal
+                    contrast_factor = self.contrast_value / 100.0  # -5 to +5
                     
-                    # Much stronger base effect - make it immediately noticeable
-                    base_opacity = min(1.0, abs(contrast_factor) * 0.8)  # Much stronger: 0.8 instead of 0.2
-                    painter.setOpacity(base_opacity)
-                    painter.drawPixmap(0, 0, pixmap)
-                    
-                    # Add multiple passes for stronger effect even at low values
-                    num_passes = max(1, int(abs(contrast_factor) * 2))  # More passes for stronger effect
-                    for i in range(min(num_passes, 4)):  # Up to 4 passes
-                        painter.setOpacity(min(0.7, abs(contrast_factor) * 0.3))  # Much stronger passes
+                    if contrast_factor > 0:
+                        # Increase contrast dramatically using multiple overlay passes
+                        painter.drawPixmap(0, 0, pixmap)
+                        painter.setCompositionMode(QPainter.CompositionMode_Overlay)
+                        
+                        # Much stronger base effect - make it immediately noticeable
+                        base_opacity = min(1.0, abs(contrast_factor) * 0.8)  # Much stronger: 0.8 instead of 0.2
+                        painter.setOpacity(base_opacity)
                         painter.drawPixmap(0, 0, pixmap)
                         
-                    # For extreme values, add even more dramatic effects
-                    if self.contrast_value > 300:
-                        painter.setCompositionMode(QPainter.CompositionMode_HardLight)
-                        painter.setOpacity(0.6)
+                        # Add multiple passes for stronger effect even at low values
+                        num_passes = max(1, int(abs(contrast_factor) * 2))  # More passes for stronger effect
+                        for i in range(min(num_passes, 4)):  # Up to 4 passes
+                            painter.setOpacity(min(0.7, abs(contrast_factor) * 0.3))  # Much stronger passes
+                            painter.drawPixmap(0, 0, pixmap)
+                            
+                        # For extreme values, add even more dramatic effects
+                        if self.contrast_value > 300:
+                            painter.setCompositionMode(QPainter.CompositionMode_HardLight)
+                            painter.setOpacity(0.6)
+                            painter.drawPixmap(0, 0, pixmap)
+                    else:
+                        # Decrease contrast much more dramatically
+                        mid_gray = QPixmap(pixmap.size())
+                        mid_gray.fill(QColor(128, 128, 128))  # 50% gray
+                        
                         painter.drawPixmap(0, 0, pixmap)
-                else:
-                    # Decrease contrast much more dramatically
-                    mid_gray = QPixmap(pixmap.size())
-                    mid_gray.fill(QColor(128, 128, 128))  # 50% gray
-                    
-                    painter.drawPixmap(0, 0, pixmap)
-                    painter.setCompositionMode(QPainter.CompositionMode_SoftLight)
-                    
-                    # Much stronger low contrast effect
-                    base_opacity = min(1.0, abs(contrast_factor) * 0.9)  # Much stronger: 0.9 instead of 0.2
-                    painter.setOpacity(base_opacity)
-                    painter.drawPixmap(0, 0, mid_gray)
-                    
-                    # Add multiple gray overlay passes for very flat look
-                    num_passes = max(1, int(abs(contrast_factor) * 1.5))
-                    for i in range(min(num_passes, 3)):
-                        painter.setOpacity(min(0.8, abs(contrast_factor) * 0.4))
+                        painter.setCompositionMode(QPainter.CompositionMode_SoftLight)
+                        
+                        # Much stronger low contrast effect
+                        base_opacity = min(1.0, abs(contrast_factor) * 0.9)  # Much stronger: 0.9 instead of 0.2
+                        painter.setOpacity(base_opacity)
                         painter.drawPixmap(0, 0, mid_gray)
-            else:
-                painter.drawPixmap(0, 0, pixmap)
-            
-            # Fast gamma approximation using multiply blend
-            if self.gamma_value != 0:
-                # Extended range: -500 to +500, where 0 is normal  
-                gamma_factor = self.gamma_value / 100.0  # -5 to +5
-                
-                if gamma_factor > 0:
-                    # Brighten dramatically using multiple screen passes
-                    painter.setCompositionMode(QPainter.CompositionMode_Screen)
-                    
-                    # Much stronger base brightening effect
-                    base_opacity = min(1.0, abs(gamma_factor) * 0.7)  # Much stronger: 0.7 instead of 0.2
-                    painter.setOpacity(base_opacity)
-                    painter.drawPixmap(0, 0, pixmap)
-                    
-                    # Add multiple screen passes for dramatic brightening even at low values
-                    num_passes = max(1, int(abs(gamma_factor) * 1.8))  # More passes
-                    for i in range(min(num_passes, 4)):  # Up to 4 passes
-                        painter.setOpacity(min(0.6, abs(gamma_factor) * 0.25))  # Much stronger passes
-                        painter.drawPixmap(0, 0, pixmap)
-                    
-                    # For extreme brightness, add color dodge for blown-out effect
-                    if self.gamma_value > 300:
-                        painter.setCompositionMode(QPainter.CompositionMode_ColorDodge)
-                        painter.setOpacity(0.4)
-                        painter.drawPixmap(0, 0, pixmap)
+                        
+                        # Add multiple gray overlay passes for very flat look
+                        num_passes = max(1, int(abs(contrast_factor) * 1.5))
+                        for i in range(min(num_passes, 3)):
+                            painter.setOpacity(min(0.8, abs(contrast_factor) * 0.4))
+                            painter.drawPixmap(0, 0, mid_gray)
                 else:
-                    # Darken dramatically using multiply with very dark overlays
-                    painter.setCompositionMode(QPainter.CompositionMode_Multiply)
+                    painter.drawPixmap(0, 0, pixmap)
+                
+                # Fast gamma approximation using multiply blend
+                if self.gamma_value != 0:
+                    # Range: -200 to +500, where 0 is normal  
+                    gamma_factor = self.gamma_value / 100.0  # -2 to +5
                     
-                    # Create much darker overlay for dramatic effect
-                    dark_overlay = QPixmap(pixmap.size())
-                    # Make it much darker: range from black to dark gray
-                    darkness_level = max(5, int(60 + gamma_factor * 40))  # Much darker range
-                    dark_overlay.fill(QColor(darkness_level, darkness_level, darkness_level))
-                    
-                    # Much stronger base darkening effect
-                    base_opacity = min(1.0, abs(gamma_factor) * 0.8)  # Much stronger: 0.8 instead of 0.2
-                    painter.setOpacity(base_opacity)
-                    painter.drawPixmap(0, 0, dark_overlay)
-                    
-                    # Add multiple dark overlay passes for very dark effect
-                    num_passes = max(1, int(abs(gamma_factor) * 1.5))
-                    for i in range(min(num_passes, 3)):
-                        # Use even darker overlay for additional passes
-                        very_dark = QPixmap(pixmap.size())
-                        very_dark.fill(QColor(20, 20, 20))  # Very dark overlay
-                        painter.setOpacity(min(0.7, abs(gamma_factor) * 0.3))
-                        painter.drawPixmap(0, 0, very_dark)
-            
-            painter.end()
-            pixmap = enhanced
+                    if gamma_factor > 0:
+                        # Brighten dramatically using multiple screen passes
+                        painter.setCompositionMode(QPainter.CompositionMode_Screen)
+                        
+                        # Much stronger base brightening effect
+                        base_opacity = min(1.0, abs(gamma_factor) * 0.7)  # Much stronger: 0.7 instead of 0.2
+                        painter.setOpacity(base_opacity)
+                        painter.drawPixmap(0, 0, pixmap)
+                        
+                        # Add multiple screen passes for dramatic brightening even at low values
+                        num_passes = max(1, int(abs(gamma_factor) * 1.8))  # More passes
+                        for i in range(min(num_passes, 4)):  # Up to 4 passes
+                            painter.setOpacity(min(0.6, abs(gamma_factor) * 0.25))  # Much stronger passes
+                            painter.drawPixmap(0, 0, pixmap)
+                        
+                        # For extreme brightness, add color dodge for blown-out effect
+                        if self.gamma_value > 300:
+                            painter.setCompositionMode(QPainter.CompositionMode_ColorDodge)
+                            painter.setOpacity(0.4)
+                            painter.drawPixmap(0, 0, pixmap)
+                    else:
+                        # Darken dramatically using multiply with very dark overlays
+                        painter.setCompositionMode(QPainter.CompositionMode_Multiply)
+                        
+                        # Create much darker overlay for dramatic effect
+                        dark_overlay = QPixmap(pixmap.size())
+                        # Make it much darker: range from black to dark gray
+                        darkness_level = max(5, int(60 + gamma_factor * 40))  # Much darker range
+                        dark_overlay.fill(QColor(darkness_level, darkness_level, darkness_level))
+                        
+                        # Much stronger base darkening effect
+                        base_opacity = min(1.0, abs(gamma_factor) * 0.8)  # Much stronger: 0.8 instead of 0.2
+                        painter.setOpacity(base_opacity)
+                        painter.drawPixmap(0, 0, dark_overlay)
+                        
+                        # Add multiple dark overlay passes for very dark effect
+                        num_passes = max(1, int(abs(gamma_factor) * 1.5))
+                        for i in range(min(num_passes, 3)):
+                            # Use even darker overlay for additional passes
+                            very_dark = QPixmap(pixmap.size())
+                            very_dark.fill(QColor(20, 20, 20))  # Very dark overlay
+                            painter.setOpacity(min(0.7, abs(gamma_factor) * 0.3))
+                            painter.drawPixmap(0, 0, very_dark)
+                
+                painter.end()
+                pixmap = enhanced
         
-        return pixmap
+            return pixmap
+        
+        except Exception as e:
+            print(f"Error in apply_fast_enhancements: {e}")
+            # Return original pixmap if enhancement fails
+            import traceback
+            traceback.print_exc()
+            return pixmap
 
     def resizeEvent(self, event):
         # Simple debounced resize handling
@@ -2645,57 +2659,105 @@ class RandomImageViewer(QMainWindow):
             self.close()
 
     def toggle_grayscale(self, checked):
-        self.grayscale_value = 100 if checked else 0
-        self.grayscale_slider.setValue(self.grayscale_value)
-        # Update toggle button state
-        if hasattr(self, 'grayscale_toggle_btn'):
-            self.grayscale_toggle_btn.setChecked(checked)
-        # Clear caches and force immediate update
-        self.enhancement_cache.clear()
-        self.scaled_cache.clear()
-        self._update_enhancement_menu_states()
-        if self.current_image:
-            self.display_image(self.current_image)
+        try:
+            self.grayscale_value = 100 if checked else 0
+            
+            # Safely update slider value
+            if hasattr(self, 'grayscale_slider') and self.grayscale_slider is not None:
+                self.grayscale_slider.setValue(self.grayscale_value)
+            
+            # Update toggle button state (block signals to prevent infinite loop)
+            if hasattr(self, 'grayscale_toggle_btn') and self.grayscale_toggle_btn is not None:
+                self.grayscale_toggle_btn.blockSignals(True)
+                self.grayscale_toggle_btn.setChecked(checked)
+                self.grayscale_toggle_btn.blockSignals(False)
+            
+            # Clear caches and force immediate update
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
+            self._update_enhancement_menu_states()
+            
+            # Safely update image display
+            if self.current_image:
+                self.display_image(self.current_image)
+                
+        except Exception as e:
+            print(f"Error in toggle_grayscale: {e}")
+            # Don't let the error crash the app, just log it
+            import traceback
+            traceback.print_exc()
 
     def toggle_contrast(self, checked=None):
         """Toggle contrast between normal (50) and enhanced (100)"""
-        if checked is None:
-            # Toggle between current and normal
-            self.contrast_value = 50 if self.contrast_value != 50 else 100
-            checked = self.contrast_value != 50
-        else:
-            # Set based on checked state
-            self.contrast_value = 100 if checked else 50
-        self.contrast_slider.setValue(self.contrast_value)
-        # Update toggle button state
-        if hasattr(self, 'contrast_toggle_btn'):
-            self.contrast_toggle_btn.setChecked(checked)
-        # Clear caches and force immediate update
-        self.enhancement_cache.clear()
-        self.scaled_cache.clear()
-        self._update_enhancement_menu_states()
-        if self.current_image:
-            self.display_image(self.current_image)
+        try:
+            if checked is None:
+                # Toggle between current and normal
+                self.contrast_value = 50 if self.contrast_value != 50 else 100
+                checked = self.contrast_value != 50
+            else:
+                # Set based on checked state
+                self.contrast_value = 100 if checked else 50
+            
+            # Safely update slider value
+            if hasattr(self, 'contrast_slider') and self.contrast_slider is not None:
+                self.contrast_slider.setValue(self.contrast_value)
+            
+            # Update toggle button state (block signals to prevent infinite loop)
+            if hasattr(self, 'contrast_toggle_btn') and self.contrast_toggle_btn is not None:
+                self.contrast_toggle_btn.blockSignals(True)
+                self.contrast_toggle_btn.setChecked(checked)
+                self.contrast_toggle_btn.blockSignals(False)
+            
+            # Clear caches and force immediate update
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
+            self._update_enhancement_menu_states()
+            
+            # Safely update image display
+            if self.current_image:
+                self.display_image(self.current_image)
+                
+        except Exception as e:
+            print(f"Error in toggle_contrast: {e}")
+            # Don't let the error crash the app, just log it
+            import traceback
+            traceback.print_exc()
 
     def toggle_gamma(self, checked=None):
         """Toggle gamma between normal (0) and enhanced (100)"""
-        if checked is None:
-            # Toggle between current and normal
-            self.gamma_value = 0 if self.gamma_value != 0 else 100
-            checked = self.gamma_value != 0
-        else:
-            # Set based on checked state
-            self.gamma_value = 100 if checked else 0
-        self.gamma_slider.setValue(self.gamma_value)
-        # Update toggle button state
-        if hasattr(self, 'gamma_toggle_btn'):
-            self.gamma_toggle_btn.setChecked(checked)
-        # Clear caches and force immediate update
-        self.enhancement_cache.clear()
-        self.scaled_cache.clear()
-        self._update_enhancement_menu_states()
-        if self.current_image:
-            self.display_image(self.current_image)
+        try:
+            if checked is None:
+                # Toggle between current and normal
+                self.gamma_value = 0 if self.gamma_value != 0 else 100
+                checked = self.gamma_value != 0
+            else:
+                # Set based on checked state
+                self.gamma_value = 100 if checked else 0
+            
+            # Safely update slider value
+            if hasattr(self, 'gamma_slider') and self.gamma_slider is not None:
+                self.gamma_slider.setValue(self.gamma_value)
+            
+            # Update toggle button state (block signals to prevent infinite loop)
+            if hasattr(self, 'gamma_toggle_btn') and self.gamma_toggle_btn is not None:
+                self.gamma_toggle_btn.blockSignals(True)
+                self.gamma_toggle_btn.setChecked(checked)
+                self.gamma_toggle_btn.blockSignals(False)
+            
+            # Clear caches and force immediate update
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
+            self._update_enhancement_menu_states()
+            
+            # Safely update image display
+            if self.current_image:
+                self.display_image(self.current_image)
+                
+        except Exception as e:
+            print(f"Error in toggle_gamma: {e}")
+            # Don't let the error crash the app, just log it
+            import traceback
+            traceback.print_exc()
 
     def _update_enhancement_menu_states(self):
         """Update the checked state of enhancement menu actions"""
@@ -2708,9 +2770,11 @@ class RandomImageViewer(QMainWindow):
 
     def update_grayscale(self, value):
         self.grayscale_value = value
-        # Update toggle button state
-        if hasattr(self, 'grayscale_toggle_btn'):
+        # Update toggle button state (block signals to prevent loops)
+        if hasattr(self, 'grayscale_toggle_btn') and self.grayscale_toggle_btn is not None:
+            self.grayscale_toggle_btn.blockSignals(True)
             self.grayscale_toggle_btn.setChecked(value > 0)
+            self.grayscale_toggle_btn.blockSignals(False)
         # Clear enhancement cache when settings change
         self.enhancement_cache.clear()
         self.scaled_cache.clear()  # Also clear scaled cache to force refresh
@@ -2720,9 +2784,11 @@ class RandomImageViewer(QMainWindow):
 
     def update_contrast(self, value):
         self.contrast_value = value
-        # Update toggle button state
-        if hasattr(self, 'contrast_toggle_btn'):
+        # Update toggle button state (block signals to prevent loops)
+        if hasattr(self, 'contrast_toggle_btn') and self.contrast_toggle_btn is not None:
+            self.contrast_toggle_btn.blockSignals(True)
             self.contrast_toggle_btn.setChecked(value != 50)
+            self.contrast_toggle_btn.blockSignals(False)
         # Clear enhancement cache when settings change
         self.enhancement_cache.clear()
         self.scaled_cache.clear()  # Also clear scaled cache to force refresh
@@ -2732,9 +2798,11 @@ class RandomImageViewer(QMainWindow):
 
     def update_gamma(self, value):
         self.gamma_value = value
-        # Update toggle button state
-        if hasattr(self, 'gamma_toggle_btn'):
-            self.gamma_toggle_btn.setChecked(value != 50)
+        # Update toggle button state (block signals to prevent loops)
+        if hasattr(self, 'gamma_toggle_btn') and self.gamma_toggle_btn is not None:
+            self.gamma_toggle_btn.blockSignals(True)
+            self.gamma_toggle_btn.setChecked(value != 0)  # Fixed: was checking != 50, should be != 0
+            self.gamma_toggle_btn.blockSignals(False)
         # Clear enhancement cache when settings change
         self.enhancement_cache.clear()
         self.scaled_cache.clear()  # Also clear scaled cache to force refresh
@@ -2743,19 +2811,42 @@ class RandomImageViewer(QMainWindow):
             self.display_image(self.current_image)
 
     def reset_enhancements(self):
-        self.grayscale_slider.setValue(0)
-        self.contrast_slider.setValue(50)
-        self.gamma_slider.setValue(0)
+        # Block signals to prevent triggering toggle functions during reset
+        if hasattr(self, 'grayscale_slider') and self.grayscale_slider is not None:
+            self.grayscale_slider.blockSignals(True)
+            self.grayscale_slider.setValue(0)
+            self.grayscale_slider.blockSignals(False)
+        
+        if hasattr(self, 'contrast_slider') and self.contrast_slider is not None:
+            self.contrast_slider.blockSignals(True)
+            self.contrast_slider.setValue(50)
+            self.contrast_slider.blockSignals(False)
+        
+        if hasattr(self, 'gamma_slider') and self.gamma_slider is not None:
+            self.gamma_slider.blockSignals(True)
+            self.gamma_slider.setValue(0)
+            self.gamma_slider.blockSignals(False)
+        
         self.grayscale_value = 0
         self.contrast_value = 50
         self.gamma_value = 0
-        # Update toggle button states
-        if hasattr(self, 'grayscale_toggle_btn'):
+        
+        # Update toggle button states (block signals to prevent loops)
+        if hasattr(self, 'grayscale_toggle_btn') and self.grayscale_toggle_btn is not None:
+            self.grayscale_toggle_btn.blockSignals(True)
             self.grayscale_toggle_btn.setChecked(False)
-        if hasattr(self, 'contrast_toggle_btn'):
+            self.grayscale_toggle_btn.blockSignals(False)
+        
+        if hasattr(self, 'contrast_toggle_btn') and self.contrast_toggle_btn is not None:
+            self.contrast_toggle_btn.blockSignals(True)
             self.contrast_toggle_btn.setChecked(False)
-        if hasattr(self, 'gamma_toggle_btn'):
+            self.contrast_toggle_btn.blockSignals(False)
+        
+        if hasattr(self, 'gamma_toggle_btn') and self.gamma_toggle_btn is not None:
+            self.gamma_toggle_btn.blockSignals(True)
             self.gamma_toggle_btn.setChecked(False)
+            self.gamma_toggle_btn.blockSignals(False)
+        
         # Clear all caches when resetting
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
