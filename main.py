@@ -974,7 +974,7 @@ class RandomImageViewer(QMainWindow):
         self.drawn_free_lines = []  # List of free lines, each with start and end points
         self.current_line_start = None  # Store first click point for free line
         self.line_thickness = 1
-        self.line_color = QColor("#ffffff")  # Default white color for lines
+        self.line_color = QColor("#242424")  # Default white color for lines
 
         # Always on top functionality
         self.always_on_top = False
@@ -985,7 +985,7 @@ class RandomImageViewer(QMainWindow):
 
         # Image enhancement parameters
         self.grayscale_value = 0  # 0 = color, 100 = full grayscale
-        self.contrast_value = 50  # 50 = normal, 0-200 range
+        self.contrast_value = 50  # 50 = normal, -130 to 200 range
         self.gamma_value = 0     # 0 = normal, -200 to +500 range
         self.rotation_angle = 0   # Rotation angle in degrees
         self.flipped_h = False    # Horizontal flip state
@@ -1624,12 +1624,12 @@ class RandomImageViewer(QMainWindow):
         toolbar.addWidget(contrast_label)
         
         self.contrast_slider = ClickableSlider(Qt.Horizontal)
-        self.contrast_slider.setRange(0, 200)
+        self.contrast_slider.setRange(-130, 200)
         self.contrast_slider.setValue(self.contrast_value)
         self.contrast_slider.setFixedWidth(70)  # Increased width for easier clicking
         self.contrast_slider.setFixedHeight(24)  # Increased height for easier clicking
         self.contrast_slider.setStyleSheet("QSlider { margin: 2px 4px; }")  # Add margins around slider
-        self.contrast_slider.setToolTip("Contrast: 50=Normal, 0=Flat, 200=Extreme")
+        self.contrast_slider.setToolTip("Contrast: 50=Normal, -130=Grey, 200=Extreme")
         self.contrast_slider.valueChanged.connect(self.update_contrast)
         toolbar.addWidget(self.contrast_slider)
 
@@ -2081,7 +2081,7 @@ class RandomImageViewer(QMainWindow):
                     pixmap = result
             
             # Apply contrast and gamma using fast QPainter effects instead of pixel manipulation
-            if self.contrast_value != 0 or self.gamma_value != 0:
+            if self.contrast_value != 50 or self.gamma_value != 0:
                 # Create enhanced version using QPainter composition
                 enhanced = QPixmap(pixmap.size())
                 enhanced.fill(Qt.transparent)
@@ -2090,49 +2090,67 @@ class RandomImageViewer(QMainWindow):
                 painter.setRenderHint(QPainter.Antialiasing)
                 
                 # Fast contrast approximation using opacity and blend modes
-                if self.contrast_value != 0:
-                    # Extended range: -500 to +500, where 0 is normal
-                    contrast_factor = self.contrast_value / 100.0  # -5 to +5
+                if self.contrast_value != 50:
+                    # Range: -130 to +200, where 50 is normal
+                    contrast_offset = self.contrast_value - 50  # Convert to offset from normal
+                    contrast_factor = contrast_offset / 50.0  # Normalize to reasonable range
                     
                     if contrast_factor > 0:
-                        # Increase contrast dramatically using multiple overlay passes
+                        # Increase contrast using multiple overlay passes
                         painter.drawPixmap(0, 0, pixmap)
                         painter.setCompositionMode(QPainter.CompositionMode_Overlay)
                         
-                        # Much stronger base effect - make it immediately noticeable
-                        base_opacity = min(1.0, abs(contrast_factor) * 0.8)  # Much stronger: 0.8 instead of 0.2
+                        # Strong base effect for immediate visibility
+                        base_opacity = min(1.0, abs(contrast_factor) * 0.8)
                         painter.setOpacity(base_opacity)
                         painter.drawPixmap(0, 0, pixmap)
                         
-                        # Add multiple passes for stronger effect even at low values
-                        num_passes = max(1, int(abs(contrast_factor) * 2))  # More passes for stronger effect
+                        # Add multiple passes for stronger effect
+                        num_passes = max(1, int(abs(contrast_factor) * 2))
                         for i in range(min(num_passes, 4)):  # Up to 4 passes
-                            painter.setOpacity(min(0.7, abs(contrast_factor) * 0.3))  # Much stronger passes
+                            painter.setOpacity(min(0.7, abs(contrast_factor) * 0.3))
                             painter.drawPixmap(0, 0, pixmap)
                             
                         # For extreme values, add even more dramatic effects
-                        if self.contrast_value > 300:
+                        if self.contrast_value > 150:
                             painter.setCompositionMode(QPainter.CompositionMode_HardLight)
                             painter.setOpacity(0.6)
                             painter.drawPixmap(0, 0, pixmap)
                     else:
-                        # Decrease contrast much more dramatically
+                        # Decrease contrast - make image flat and gray
+                        # Create a much more dramatic low-contrast effect
+                        
+                        # Start with original image
+                        painter.drawPixmap(0, 0, pixmap)
+                        
+                        # Blend heavily with gray using multiple techniques for maximum effect
                         mid_gray = QPixmap(pixmap.size())
                         mid_gray.fill(QColor(128, 128, 128))  # 50% gray
                         
-                        painter.drawPixmap(0, 0, pixmap)
-                        painter.setCompositionMode(QPainter.CompositionMode_SoftLight)
+                        # Method 1: Direct overlay with gray using multiply mode for washing out
+                        painter.setCompositionMode(QPainter.CompositionMode_Multiply)
+                        gray_strength = abs(contrast_factor)  # 0 to 3.6 for range -130 to 50
                         
-                        # Much stronger low contrast effect
-                        base_opacity = min(1.0, abs(contrast_factor) * 0.9)  # Much stronger: 0.9 instead of 0.2
+                        # Much stronger effect - make it very noticeable immediately
+                        base_opacity = min(1.0, gray_strength * 0.7)  # Strong immediate effect
                         painter.setOpacity(base_opacity)
                         painter.drawPixmap(0, 0, mid_gray)
                         
-                        # Add multiple gray overlay passes for very flat look
-                        num_passes = max(1, int(abs(contrast_factor) * 1.5))
-                        for i in range(min(num_passes, 3)):
-                            painter.setOpacity(min(0.8, abs(contrast_factor) * 0.4))
+                        # Method 2: Add screen blend to further wash out the image
+                        painter.setCompositionMode(QPainter.CompositionMode_Screen)
+                        painter.setOpacity(min(0.8, gray_strength * 0.5))
+                        painter.drawPixmap(0, 0, mid_gray)
+                        
+                        # Method 3: For extreme negative values, add direct color burn for maximum flattening
+                        if self.contrast_value < 0:  # For truly negative values
+                            painter.setCompositionMode(QPainter.CompositionMode_ColorBurn)
+                            painter.setOpacity(min(0.6, gray_strength * 0.3))
                             painter.drawPixmap(0, 0, mid_gray)
+                            
+                        # Method 4: Final soft light pass to complete the washed-out look
+                        painter.setCompositionMode(QPainter.CompositionMode_SoftLight)
+                        painter.setOpacity(min(0.9, gray_strength * 0.6))
+                        painter.drawPixmap(0, 0, mid_gray)
                 else:
                     painter.drawPixmap(0, 0, pixmap)
                 
