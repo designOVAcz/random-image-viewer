@@ -505,15 +505,30 @@ class ImageLabel(QLabel):
                     self.pan_offset_y = 0
                     self.zoom_factor = 1.0
                 
-                # Trigger image redisplay with new zoom
-                self.parent_viewer.display_image(self.parent_viewer.current_image)
+                # Trigger image redisplay with new zoom using smart caching
+                self.parent_viewer._smart_zoom_display()
                 
-                # Update status to show zoom level
+                # Update status to show zoom level (but preserve LUT processing status if active)
                 zoom_percent = int(self.zoom_factor * 100)
-                if self.zoom_factor > 1.0:
-                    self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}% (Right-click drag to pan)")
+                
+                # Check if LUT is processing in background
+                if (hasattr(self.parent_viewer, '_async_processing_state') and 
+                    self.parent_viewer._async_processing_state and
+                    self.parent_viewer.current_lut):
+                    # LUT processing active - show progress instead of just zoom
+                    state = self.parent_viewer._async_processing_state
+                    progress = (state['current_row'] / state['total_rows']) * 100
+                    lut_name = self.parent_viewer.current_lut_name if self.parent_viewer.current_lut_name != "None" else "LUT"
+                    if self.zoom_factor > 1.0:
+                        self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}% - {lut_name} processing... {progress:.0f}% (Right-click drag to pan)")
+                    else:
+                        self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}% - {lut_name} processing... {progress:.0f}%")
                 else:
-                    self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}%")
+                    # No LUT processing - show normal zoom status
+                    if self.zoom_factor > 1.0:
+                        self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}% (Right-click drag to pan)")
+                    else:
+                        self.parent_viewer.status.showMessage(f"Zoom: {zoom_percent}%")
         else:
             # Don't accept the event, let it propagate
             event.ignore()
@@ -661,9 +676,9 @@ class ImageLabel(QLabel):
             # Update last point
             self.last_pan_point = current_point
             
-            # Refresh the display
+            # Refresh the display using smart zoom system to preserve LUT processing
             if self.parent_viewer and self.parent_viewer.current_image:
-                self.parent_viewer.display_image(self.parent_viewer.current_image)
+                self.parent_viewer._smart_zoom_display()
             
             event.accept()
             return
@@ -923,9 +938,10 @@ class ResponsiveEnhancementWidget(QWidget):
             elif not should_use_two_rows and current_width > (self.width_threshold + 10):
                 self._update_toolbar_layout(current_width)
         
-        # Handle image display resize
+        # Handle image display resize using smart caching system
         if self.current_image:
-            self.display_image(self.current_image)
+            # Use smart zoom display to preserve LUT caching during resize
+            self._smart_zoom_display()
 
     def sizeHint(self):
         """Provide a size hint for the layout system"""
@@ -1829,7 +1845,7 @@ class RandomImageViewer(QMainWindow):
                 self.history_list.clear()
                 available = self.images[:]
             img_path = random.choice(available)
-            self.display_image(img_path)
+            self._display_image_with_lut_preview(img_path)
             self.add_to_history(img_path)
             self.current_image = img_path
             self.update_image_info(img_path)
@@ -1847,6 +1863,10 @@ class RandomImageViewer(QMainWindow):
         self.show_random_image()
 
     def display_image(self, img_path):
+        # Clear LUT processing cache when changing images to prevent memory buildup
+        if hasattr(self, 'current_image') and self.current_image != img_path:
+            self.clear_lut_cache()
+        
         # Create cache key including enhancement settings, rotation, and flips
         cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}_{self.flipped_h}_{self.flipped_v}_{self.current_lut_name}_{self.lut_strength}"
         
@@ -1867,8 +1887,45 @@ class RandomImageViewer(QMainWindow):
                 # Cache the base pixmap
                 self._manage_cache(self.pixmap_cache, img_path, base_pixmap)
             
-            # Apply enhancements only if needed
-            if self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 0 or (self.current_lut and self.lut_strength > 0):
+            # SMART LUT PROCESSING: Use full quality when lines are present
+            if self.current_lut and self.lut_strength > 0:
+                # Check if we have cached LUT result (with lines)
+                lut_cache_key = self._get_lut_cache_key()
+                if (hasattr(self, '_lut_process_cache') and 
+                    lut_cache_key in self._lut_process_cache):
+                    # Use cached full-quality LUT result
+                    pixmap = self._lut_process_cache[lut_cache_key].copy()
+                else:
+                    # Need full LUT processing - especially important for lines
+                    if (self.lines_visible and 
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)):
+                        # Lines present: FORCE full quality async LUT processing
+                        self.current_image = img_path  # Set this first
+                        
+                        # Show fast preview immediately while full processing happens
+                        self.status.showMessage(f"Rendering lines with LUT... (preview)")
+                        QApplication.processEvents()
+                        
+                        # Create fast preview with lines for immediate feedback
+                        fast_pixmap = self.apply_fast_enhancements(base_pixmap.copy())
+                        
+                        # Apply basic transforms to preview
+                        if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                            fast_pixmap = self._apply_quick_transforms(fast_pixmap)
+                        
+                        # Scale and show preview immediately
+                        preview_scaled = self._scale_pixmap(fast_pixmap, img_path)
+                        self.image_label.setPixmap(preview_scaled)
+                        QApplication.processEvents()
+                        
+                        # Start full quality processing
+                        self._start_async_lut_processing()
+                        return  # Exit here - async processing will complete display
+                    else:
+                        # No lines: Can use fast enhancement for quick preview
+                        pixmap = self.apply_fast_enhancements(base_pixmap.copy())
+            elif self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 0:
+                # Only basic enhancements needed
                 pixmap = self.apply_fast_enhancements(base_pixmap.copy())
             else:
                 pixmap = base_pixmap
@@ -2262,29 +2319,48 @@ class RandomImageViewer(QMainWindow):
             return None
 
     def apply_lut_to_image(self, pixmap, lut, strength=100):
-        """Apply a 3D LUT to a pixmap with specified strength - ULTRA-FAST VERSION"""
+        """Apply a 3D LUT to a pixmap with specified strength - SMART CACHING VERSION"""
         if not lut or not pixmap or pixmap.isNull():
             return pixmap
         
         try:
-            # For very fast processing, scale down large images aggressively
+            # Create improved cache key that includes image dimensions for zoom awareness
+            cache_key = f"lut_{id(pixmap)}_{pixmap.width()}x{pixmap.height()}_{lut['file_path']}_{strength}"
+            
+            # Check if we already processed this exact combination
+            if hasattr(self, '_lut_process_cache') and cache_key in self._lut_process_cache:
+                return self._lut_process_cache[cache_key]
+            
+            # Initialize LUT process cache if not exists
+            if not hasattr(self, '_lut_process_cache'):
+                self._lut_process_cache = {}
+            
+            # Adaptive processing based on image size
             image = pixmap.toImage()
             if image.isNull():
                 return pixmap
             
             original_size = image.size()
-            max_lut_size = 1024  # Even smaller max size for speed
+            image_pixels = image.width() * image.height()
             
-            # Scale down large images more aggressively
+            # Dynamic max size based on image complexity
+            if image_pixels > 4000000:  # Very large (>4MP)
+                max_lut_size = 1200  # Aggressive scaling for huge images
+            elif image_pixels > 2000000:  # Large (>2MP) 
+                max_lut_size = 1600  # Moderate scaling
+            else:
+                max_lut_size = 2048  # Keep quality for smaller images
+            
+            # Only scale down very large images, keep more detail
             if image.width() > max_lut_size or image.height() > max_lut_size:
                 scale_factor = min(max_lut_size / image.width(), max_lut_size / image.height())
                 scaled_size = QSize(int(image.width() * scale_factor), int(image.height() * scale_factor))
-                image = image.scaled(scaled_size, Qt.KeepAspectRatio, Qt.FastTransformation)  # Use FastTransformation
+                image = image.scaled(scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 is_scaled = True
             else:
                 is_scaled = False
             
-            # Convert to RGB32 format for fastest processing
+            # Convert to RGB32 format for processing
             if image.format() != image.Format.Format_RGB32:
                 image = image.convertToFormat(image.Format.Format_RGB32)
             
@@ -2294,26 +2370,216 @@ class RandomImageViewer(QMainWindow):
             lut_data = lut['data']
             strength_factor = strength / 100.0
             
-            # Use simplified nearest-neighbor LUT lookup for speed
-            # This sacrifices some quality for much better performance
-            if lut_size <= 32:
-                # For smaller LUTs, use fast lookup table approach
-                self._apply_lut_fast_lookup(image, lut_data, lut_size, strength_factor)
+            # Choose processing method based on scaled image size
+            scaled_pixels = width * height
+            if scaled_pixels > 1500000:  # Still large after scaling
+                # Use optimized fast mode for very large images
+                self._apply_lut_optimized(image, lut_data, lut_size, strength_factor)
             else:
-                # For larger LUTs, use reduced resolution sampling
-                self._apply_lut_reduced_sampling(image, lut_data, lut_size, strength_factor)
+                # Use high quality mode for moderate sized images
+                self._apply_lut_with_interpolation(image, lut_data, lut_size, strength_factor)
             
-            # If we scaled down, scale back up to original size
+            # If we scaled down, scale back up to original size with quality
             if is_scaled:
                 image = image.scaled(original_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             
-            return QPixmap.fromImage(image)
+            result_pixmap = QPixmap.fromImage(image)
+            
+            # Smart cache management - keep more entries for smaller images
+            max_cache_size = 8 if image_pixels < 1000000 else 4
+            if len(self._lut_process_cache) > max_cache_size:
+                # Remove oldest entries
+                oldest_key = next(iter(self._lut_process_cache))
+                del self._lut_process_cache[oldest_key]
+            
+            self._lut_process_cache[cache_key] = result_pixmap
+            return result_pixmap
             
         except Exception as e:
             print(f"Error applying LUT: {e}")
             return pixmap
 
-    def _apply_lut_fast_lookup(self, image, lut_data, lut_size, strength_factor):
+    def clear_lut_cache(self):
+        """Clear LUT processing cache to free memory"""
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+            
+    def _apply_lut_optimized(self, image, lut_data, lut_size, strength_factor):
+        """Optimized LUT application - faster but still good quality with progress"""
+        width = image.width()
+        height = image.height()
+        
+        # Use larger chunks for better performance
+        chunk_size = 32  # Larger chunks for speed
+        total_chunks = (height + chunk_size - 1) // chunk_size
+        processed_chunks = 0
+        
+        for y_start in range(0, height, chunk_size):
+            y_end = min(y_start + chunk_size, height)
+            
+            for y in range(y_start, y_end):
+                scan_line = image.scanLine(y)
+                
+                # Process every 2nd pixel for speed, then interpolate
+                for x in range(0, width, 2):
+                    offset = x * 4
+                    
+                    # Read pixel bytes (BGRA order in Qt)
+                    b = scan_line[offset]
+                    g = scan_line[offset + 1] 
+                    r = scan_line[offset + 2]
+                    a = scan_line[offset + 3]
+                    
+                    # Normalize to 0-1 range
+                    r_norm = r / 255.0
+                    g_norm = g / 255.0
+                    b_norm = b / 255.0
+                    
+                    # Use faster interpolation
+                    lut_result = self._interpolate_lut_fast(r_norm, g_norm, b_norm, lut_data, lut_size)
+                    
+                    # Blend with original using strength factor
+                    final_r = r_norm * (1.0 - strength_factor) + lut_result[0] * strength_factor
+                    final_g = g_norm * (1.0 - strength_factor) + lut_result[1] * strength_factor
+                    final_b = b_norm * (1.0 - strength_factor) + lut_result[2] * strength_factor
+                    
+                    # Clamp and convert back to bytes
+                    final_r = max(0, min(255, int(final_r * 255 + 0.5)))
+                    final_g = max(0, min(255, int(final_g * 255 + 0.5)))
+                    final_b = max(0, min(255, int(final_b * 255 + 0.5)))
+                    
+                    # Write back to image (BGRA order)
+                    scan_line[offset] = final_b
+                    scan_line[offset + 1] = final_g
+                    scan_line[offset + 2] = final_r
+                    scan_line[offset + 3] = a
+                    
+                    # Fill the next pixel with interpolated values for speed
+                    if x + 1 < width:
+                        next_offset = (x + 1) * 4
+                        scan_line[next_offset] = final_b
+                        scan_line[next_offset + 1] = final_g
+                        scan_line[next_offset + 2] = final_r
+                        scan_line[next_offset + 3] = scan_line[next_offset + 3]  # Keep original alpha
+            
+            # Progress callback every few chunks to keep UI responsive
+            processed_chunks += 1
+            if hasattr(self, '_lut_progress_callback') and self._lut_progress_callback:
+                if processed_chunks % 3 == 0:  # Update every 3 chunks
+                    self._lut_progress_callback()  # Allow UI updates
+
+    def _apply_lut_with_interpolation(self, image, lut_data, lut_size, strength_factor):
+        """High-quality LUT application with trilinear interpolation"""
+        width = image.width()
+        height = image.height()
+        
+        # Process in smaller chunks for better performance while maintaining quality
+        chunk_size = 16  # Smaller chunks for better cache performance
+        
+        for y_start in range(0, height, chunk_size):
+            y_end = min(y_start + chunk_size, height)
+            
+            for y in range(y_start, y_end):
+                scan_line = image.scanLine(y)
+                
+                for x in range(width):
+                    offset = x * 4
+                    
+                    # Read pixel bytes (BGRA order in Qt)
+                    b = scan_line[offset]
+                    g = scan_line[offset + 1] 
+                    r = scan_line[offset + 2]
+                    a = scan_line[offset + 3]  # Preserve alpha
+                    
+                    # Normalize to 0-1 range
+                    r_norm = r / 255.0
+                    g_norm = g / 255.0
+                    b_norm = b / 255.0
+                    
+                    # Apply LUT with trilinear interpolation for quality
+                    lut_result = self._interpolate_lut_quality(r_norm, g_norm, b_norm, lut_data, lut_size)
+                    
+                    # Blend with original using strength factor
+                    final_r = r_norm * (1.0 - strength_factor) + lut_result[0] * strength_factor
+                    final_g = g_norm * (1.0 - strength_factor) + lut_result[1] * strength_factor
+                    final_b = b_norm * (1.0 - strength_factor) + lut_result[2] * strength_factor
+                    
+                    # Clamp and convert back to bytes
+                    final_r = max(0, min(255, int(final_r * 255 + 0.5)))
+                    final_g = max(0, min(255, int(final_g * 255 + 0.5)))
+                    final_b = max(0, min(255, int(final_b * 255 + 0.5)))
+                    
+                    # Write back to image (BGRA order)
+                    scan_line[offset] = final_b
+                    scan_line[offset + 1] = final_g
+                    scan_line[offset + 2] = final_r
+                    scan_line[offset + 3] = a  # Preserve alpha
+    
+    def _interpolate_lut_quality(self, r, g, b, lut_data, lut_size):
+        """High-quality trilinear interpolation in 3D LUT"""
+        # Scale to LUT coordinate space
+        r_scaled = r * (lut_size - 1)
+        g_scaled = g * (lut_size - 1)
+        b_scaled = b * (lut_size - 1)
+        
+        # Get integer coordinates with bounds checking
+        r_low = max(0, min(int(r_scaled), lut_size - 1))
+        g_low = max(0, min(int(g_scaled), lut_size - 1))
+        b_low = max(0, min(int(b_scaled), lut_size - 1))
+        
+        r_high = min(r_low + 1, lut_size - 1)
+        g_high = min(g_low + 1, lut_size - 1)
+        b_high = min(b_low + 1, lut_size - 1)
+        
+        # Get fractional parts for smooth interpolation
+        r_frac = r_scaled - r_low
+        g_frac = g_scaled - g_low
+        b_frac = b_scaled - b_low
+        
+        # Helper function to safely get LUT value
+        def get_lut_value(ri, gi, bi):
+            try:
+                idx = ri + gi * lut_size + bi * lut_size * lut_size
+                if 0 <= idx < len(lut_data):
+                    return lut_data[idx]
+                else:
+                    return (r, g, b)  # Fallback to original
+            except (IndexError, ValueError):
+                return (r, g, b)  # Fallback to original
+        
+        # Get 8 corner values for trilinear interpolation
+        c000 = get_lut_value(r_low, g_low, b_low)
+        c001 = get_lut_value(r_low, g_low, b_high)
+        c010 = get_lut_value(r_low, g_high, b_low)
+        c011 = get_lut_value(r_low, g_high, b_high)
+        c100 = get_lut_value(r_high, g_low, b_low)
+        c101 = get_lut_value(r_high, g_low, b_high)
+        c110 = get_lut_value(r_high, g_high, b_low)
+        c111 = get_lut_value(r_high, g_high, b_high)
+        
+        # Linear interpolation helper
+        def lerp(a, b, t):
+            return (
+                a[0] * (1.0 - t) + b[0] * t,
+                a[1] * (1.0 - t) + b[1] * t,
+                a[2] * (1.0 - t) + b[2] * t
+            )
+        
+        # Trilinear interpolation
+        # Interpolate along b axis
+        c00 = lerp(c000, c001, b_frac)
+        c01 = lerp(c010, c011, b_frac)
+        c10 = lerp(c100, c101, b_frac)
+        c11 = lerp(c110, c111, b_frac)
+        
+        # Interpolate along g axis
+        c0 = lerp(c00, c01, g_frac)
+        c1 = lerp(c10, c11, g_frac)
+        
+        # Final interpolation along r axis
+        result = lerp(c0, c1, r_frac)
+        
+        return result
         """Ultra-fast LUT application using lookup tables and nearest neighbor"""
         width = image.width()
         height = image.height()
@@ -2783,9 +3049,10 @@ class RandomImageViewer(QMainWindow):
             elif not should_use_two_rows and current_width > (self.width_threshold + 10):
                 self._update_toolbar_layout(current_width)
         
-        # Handle image display resize
+        # Handle image display resize using smart caching system
         if self.current_image:
-            self.display_image(self.current_image)
+            # Use smart zoom display to preserve LUT caching during resize
+            self._smart_zoom_display()
 
     def add_to_history(self, img_path):
         # If we've navigated back in history and now show a new random image,
@@ -2988,7 +3255,14 @@ class RandomImageViewer(QMainWindow):
 
     def update_line_thickness(self, value):
         self.line_thickness = value
+        # Clear LUT cache since line appearance changed
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+        # Clear enhancement cache to force full redraw with new thickness
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
         if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            # Force full display_image to ensure changes are visible
             self.display_image(self.current_image)
 
     def choose_line_color(self):
@@ -2998,8 +3272,15 @@ class RandomImageViewer(QMainWindow):
             self.line_color = color
             # Update button background to show selected color
             self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border: 1px solid #666; }}")
+            # Clear LUT cache since line appearance changed
+            if hasattr(self, '_lut_process_cache'):
+                self._lut_process_cache.clear()
+            # Clear enhancement cache to force full redraw with new color
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
             # Redraw current image with new color if there are lines
             if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+                # Force full display_image to ensure changes are visible
                 self.display_image(self.current_image)
 
     def set_line_color(self, color_hex):
@@ -3007,20 +3288,41 @@ class RandomImageViewer(QMainWindow):
         self.line_color = QColor(color_hex)
         # Update main color button background to show selected color
         self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border: 1px solid #666; }}")
+        # Clear LUT cache since line appearance changed
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+        # Clear enhancement cache to force full redraw with new color
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
         # Redraw current image with new color if there are lines
         if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            # Force full display_image to ensure changes are visible
             self.display_image(self.current_image)
 
     def add_line(self, x_position):
         if x_position not in self.drawn_lines:
             self.drawn_lines.append(x_position)
+            # Clear LUT cache since lines changed
+            if hasattr(self, '_lut_process_cache'):
+                self._lut_process_cache.clear()
+            # Clear enhancement cache to force full redraw with lines
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
             if self.current_image:
+                # Force full display_image to ensure lines are visible
                 self.display_image(self.current_image)
 
     def add_hline(self, y_position):
         if y_position not in self.drawn_horizontal_lines:
             self.drawn_horizontal_lines.append(y_position)
+            # Clear LUT cache since lines changed
+            if hasattr(self, '_lut_process_cache'):
+                self._lut_process_cache.clear()
+            # Clear enhancement cache to force full redraw with lines
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
             if self.current_image:
+                # Force full display_image to ensure lines are visible
                 self.display_image(self.current_image)
 
     def add_free_line_point(self, x, y):
@@ -3041,10 +3343,17 @@ class RandomImageViewer(QMainWindow):
             }
             self.drawn_free_lines.append(line)
             
+            # Clear LUT cache since lines changed
+            if hasattr(self, '_lut_process_cache'):
+                self._lut_process_cache.clear()
+            # Clear enhancement cache to force full redraw with lines
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
+            
             # Reset for next line
             self.current_line_start = None
             
-            # Update display
+            # Update display - force full display_image to ensure lines are visible
             if self.current_image:
                 self.display_image(self.current_image)
             
@@ -3055,7 +3364,14 @@ class RandomImageViewer(QMainWindow):
         self.drawn_horizontal_lines.clear()
         self.drawn_free_lines.clear()
         self.current_line_start = None
+        # Clear LUT cache since lines changed
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+        # Clear enhancement cache to force full redraw
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
         if self.current_image:
+            # Force full display_image to ensure changes are visible
             self.display_image(self.current_image)
 
     def undo_last_line(self):
@@ -3083,7 +3399,14 @@ class RandomImageViewer(QMainWindow):
             self._update_cursor_and_status()  # Update status message
         
         if removed_something:
+            # Clear LUT cache since lines changed
+            if hasattr(self, '_lut_process_cache'):
+                self._lut_process_cache.clear()
+            # Clear enhancement cache to force full redraw
+            self.enhancement_cache.clear()
+            self.scaled_cache.clear()
             if self.current_image:
+                # Force full display_image to ensure changes are visible
                 self.display_image(self.current_image)
             self.status.showMessage("Removed last line")
         else:
@@ -3097,8 +3420,16 @@ class RandomImageViewer(QMainWindow):
             self.toggle_lines_btn.setText("👁" if checked else "🙈")  # Eye open/closed
             self.toggle_lines_btn.setToolTip("Hide Lines" if checked else "Show Lines")
         
+        # Clear LUT cache since line visibility changed
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+        # Clear enhancement cache to force full redraw
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        
         # Redraw current image to show/hide lines
         if self.current_image:
+            # Force full display_image to ensure visibility changes are applied
             self.display_image(self.current_image)
         
         # Update status message
@@ -3558,61 +3889,808 @@ class RandomImageViewer(QMainWindow):
                 self.current_lut = None
                 self.current_lut_name = "None"
         
-        # Clear caches and update display with fast preview
+        # Clear caches and update display with progressive preview
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()  # Clear LUT cache when LUT changes
         if self.current_image:
-            # Show immediate preview with low quality for responsiveness
+            # Show immediate preview with fast processing for responsiveness
             if self.current_lut:
-                self.status.showMessage(f"Applying {lut_name}... (preview)")
+                self.status.showMessage(f"Applying {lut_name}... (instant preview)")
                 QApplication.processEvents()
+                
+                # Create fast preview first (smaller image, low quality)
+                self._create_fast_lut_preview()
+            
+            # Then apply full quality in background with progress
+            QTimer.singleShot(10, self._apply_full_quality_lut)
+
+    def _create_fast_lut_preview(self):
+        """Create an instant high-quality preview optimized for display size"""
+        if not self.current_image or not self.current_lut:
+            print("DEBUG: No current image or LUT for preview")
+            return
+            
+        try:
+            # Load base image quickly
+            if self.current_image in self.pixmap_cache:
+                base_pixmap = self.pixmap_cache[self.current_image]
+            else:
+                base_pixmap, error = safe_load_pixmap(self.current_image)
+                if error:
+                    return
+            
+            # SMART PREVIEW SIZING: Adapt quality to display size and zoom level
+            display_width = self.image_label.width()
+            display_height = self.image_label.height()
+            zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+            
+            # Calculate the effective display size considering zoom
+            effective_width = int(display_width * zoom_factor)
+            effective_height = int(display_height * zoom_factor)
+            
+            # For large displays or high zoom, use higher quality preview
+            if effective_width > 1200 or effective_height > 800:
+                # High quality: Use 2/3 of original size for large displays
+                preview_size = min(1200, 
+                                 int(base_pixmap.width() * 0.67), 
+                                 int(base_pixmap.height() * 0.67))
+                transform_quality = Qt.SmoothTransformation  # Better quality for large displays
+            elif effective_width > 800 or effective_height > 600:
+                # Medium quality: Use 1/2 of original size for medium displays
+                preview_size = min(900, 
+                                 base_pixmap.width() // 2, 
+                                 base_pixmap.height() // 2)
+                transform_quality = Qt.SmoothTransformation  # Better quality
+            else:
+                # Standard quality: Use 1/3 for smaller displays/zoom
+                preview_size = min(600, 
+                                 base_pixmap.width() // 3, 
+                                 base_pixmap.height() // 3)
+                transform_quality = Qt.FastTransformation  # Fast for small displays
+            
+            # Scale with appropriate quality
+            fast_preview = base_pixmap.scaled(
+                preview_size, preview_size,
+                Qt.KeepAspectRatio, transform_quality
+            )
+            
+            # IMPORTANT: Apply LUT using the same method as the main application
+            # Convert to the format expected by apply_lut_to_image
+            lut_dict = {
+                'data': self.current_lut['data'],
+                'size': self.current_lut['size'],
+                'file_path': getattr(self.current_lut, 'file_path', 'preview')
+            }
+            
+            # Use the existing optimized LUT application method
+            fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
+            
+            # Apply basic transformations (rotation, flips) with appropriate quality
+            fast_preview = self._apply_quick_transforms(fast_preview, transform_quality)
+            
+            # Scale to display size and show immediately
+            final_preview = self._scale_pixmap(fast_preview, self.current_image)
+            self.image_label.setPixmap(final_preview)
+            QApplication.processEvents()
+            
+        except Exception as e:
+            print(f"Error creating fast preview: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _apply_full_quality_lut(self):
+        """Apply full quality LUT processing asynchronously to prevent freezing"""
+        if not self.current_image or not self.current_lut:
+            return
+            
+        try:
+            # Update status to show full quality processing
+            lut_name = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+            self.status.showMessage(f"Applying {lut_name}... (full quality)")
+            QApplication.processEvents()
+            
+            # Start async chunked processing to prevent any freezing
+            self._start_async_lut_processing()
+            
+        except Exception as e:
+            print(f"Error in full quality LUT processing: {e}")
+            self.status.showMessage("LUT processing error - using preview")
+
+    def _start_async_lut_processing(self):
+        """Start asynchronous LUT processing to prevent any UI freezing"""
+        if not self.current_image or not self.current_lut:
+            return
+        
+        # Check if we're already processing the same image/LUT combination
+        current_cache_key = self._get_lut_cache_key()
+        if (hasattr(self, '_async_processing_state') and 
+            self._async_processing_state and 
+            hasattr(self._async_processing_state, 'cache_key') and
+            self._async_processing_state['cache_key'] == current_cache_key):
+            # Already processing the same LUT combination - don't restart
+            print("LUT processing already in progress for this image/LUT combination")
+            return
+        
+        # Stop any existing processing for different image/LUT combination
+        if hasattr(self, '_async_processing_state') and self._async_processing_state:
+            if hasattr(self, '_async_processing_timer'):
+                self._async_processing_timer.stop()
+            self._async_processing_state = None
+            
+        try:
+            # Load base image
+            if self.current_image in self.pixmap_cache:
+                base_pixmap = self.pixmap_cache[self.current_image]
+            else:
+                base_pixmap, error = safe_load_pixmap(self.current_image)
+                if error:
+                    self.status.showMessage("Error loading image for LUT processing")
+                    return
+                # Cache the loaded image
+                self._manage_cache(self.pixmap_cache, self.current_image, base_pixmap)
+            
+            # Convert to image for processing
+            image = base_pixmap.toImage()
+            if image.format() != image.Format.Format_RGB32:
+                image = image.convertToFormat(image.Format.Format_RGB32)
+            
+            # Setup async processing state with cache key tracking
+            self._async_processing_state = {
+                'image': image,
+                'width': image.width(),
+                'height': image.height(),
+                'current_row': 0,
+                'total_rows': image.height(),
+                'chunk_size': 8,  # Process 8 rows at a time for smooth UI
+                'lut_data': self.current_lut['data'],
+                'lut_size': self.current_lut['size'],
+                'strength_factor': self.lut_strength / 100.0,
+                'start_time': time.time(),
+                'cache_key': current_cache_key  # Track what we're processing
+            }
+            
+            # Start the async processing timer
+            if not hasattr(self, '_async_processing_timer'):
+                self._async_processing_timer = QTimer()
+                self._async_processing_timer.timeout.connect(self._process_lut_chunk)
+            
+            # Process first chunk immediately, then continue with timer
+            self._process_lut_chunk()
+            self._async_processing_timer.start(1)  # 1ms interval for smooth processing
+            
+        except Exception as e:
+            print(f"Error starting async LUT processing: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _process_lut_chunk(self):
+        """Process a small chunk of the image asynchronously"""
+        if not hasattr(self, '_async_processing_state') or not self._async_processing_state:
+            if hasattr(self, '_async_processing_timer'):
+                self._async_processing_timer.stop()
+            return
+            
+        try:
+            state = self._async_processing_state
+            image = state['image']
+            current_row = state['current_row']
+            chunk_size = state['chunk_size']
+            width = state['width']
+            height = state['height']
+            lut_data = state['lut_data']
+            lut_size = state['lut_size']
+            strength_factor = state['strength_factor']
+            
+            # Process chunk_size rows
+            end_row = min(current_row + chunk_size, height)
+            
+            for y in range(current_row, end_row):
+                scan_line = image.scanLine(y)
+                
+                for x in range(width):
+                    offset = x * 4
+                    
+                    # Read pixel bytes (BGRA order in Qt)
+                    b = scan_line[offset]
+                    g = scan_line[offset + 1] 
+                    r = scan_line[offset + 2]
+                    a = scan_line[offset + 3]
+                    
+                    # Normalize to 0-1 range
+                    r_norm = r / 255.0
+                    g_norm = g / 255.0
+                    b_norm = b / 255.0
+                    
+                    # Apply LUT with quality interpolation
+                    lut_result = self._interpolate_lut_quality(r_norm, g_norm, b_norm, lut_data, lut_size)
+                    
+                    # Blend with original using strength factor
+                    final_r = r_norm * (1.0 - strength_factor) + lut_result[0] * strength_factor
+                    final_g = g_norm * (1.0 - strength_factor) + lut_result[1] * strength_factor
+                    final_b = b_norm * (1.0 - strength_factor) + lut_result[2] * strength_factor
+                    
+                    # Clamp and convert back to bytes
+                    final_r = max(0, min(255, int(final_r * 255 + 0.5)))
+                    final_g = max(0, min(255, int(final_g * 255 + 0.5)))
+                    final_b = max(0, min(255, int(final_b * 255 + 0.5)))
+                    
+                    # Write back to image (BGRA order)
+                    scan_line[offset] = final_b
+                    scan_line[offset + 1] = final_g
+                    scan_line[offset + 2] = final_r
+                    scan_line[offset + 3] = a
+            
+            # Update progress
+            state['current_row'] = end_row
+            progress = (end_row / height) * 100
+            
+            # Update status every few chunks
+            if end_row % (chunk_size * 3) == 0 or end_row >= height:
+                lut_name = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+                self.status.showMessage(f"Applying {lut_name}... {progress:.0f}%")
+            
+            # Check if processing is complete
+            if end_row >= height:
+                self._finish_async_lut_processing()
+                
+        except Exception as e:
+            print(f"Error in LUT chunk processing: {e}")
+            import traceback
+            traceback.print_exc()
+            # Stop processing on error
+            if hasattr(self, '_async_processing_timer'):
+                self._async_processing_timer.stop()
+            self._async_processing_state = None
+    
+    def _finish_async_lut_processing(self):
+        """Complete the async LUT processing and display the result - NOW FULLY ASYNC"""
+        try:
+            if hasattr(self, '_async_processing_timer'):
+                self._async_processing_timer.stop()
+            
+            if not hasattr(self, '_async_processing_state') or not self._async_processing_state:
+                return
+                
+            state = self._async_processing_state
+            processed_image = state['image']
+            
+            # Convert back to pixmap
+            processed_pixmap = QPixmap.fromImage(processed_image)
+            
+            # REMOVED: Don't cache here - cache at the END after lines are added
+            # The cache will be updated in the final step with the complete image
+            
+            # INSTANT FINALIZATION: Complete synchronously for maximum speed
+            self.status.showMessage("Finalizing LUT...")
+            
+            # Store final processing state
+            self._final_processing_state = {
+                'pixmap': processed_pixmap,
+                'processing_time': time.time() - state['start_time']
+            }
+            
+            # Clear the main processing state 
+            self._async_processing_state = None
+            
+            # Call finalization immediately - NO delay for instant completion
+            self._async_finalize_step()
+            
+        except Exception as e:
+            print(f"Error finishing async LUT processing: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to current display
+            self.status.showMessage("LUT processing completed with errors")
+            self._async_processing_state = None
+    
+    def _async_finalize_step(self):
+        """Process final LUT steps instantly - ZERO delay completion"""
+        if not hasattr(self, '_final_processing_state') or not self._final_processing_state:
+            return
+            
+        try:
+            state = self._final_processing_state
+            processed_pixmap = state['pixmap']
+            
+            # INSTANT FINALIZATION: Complete everything synchronously in one go
+            self.status.showMessage("Finalizing LUT...")
+            
+            # Apply ALL transformations immediately
+            if self.rotation_angle != 0:
+                transform = QTransform()
+                transform.rotate(self.rotation_angle)
+                processed_pixmap = processed_pixmap.transformed(transform, Qt.SmoothTransformation)
+            
+            if self.flipped_h:
+                processed_pixmap = processed_pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation)
+            if self.flipped_v:
+                processed_pixmap = processed_pixmap.transformed(QTransform().scale(1, -1), Qt.SmoothTransformation)
+            
+            if (self.grayscale_value != 0 or self.contrast_value != 50 or self.gamma_value != 0):
+                processed_pixmap = self.apply_fast_enhancements(processed_pixmap)
+            
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)):
+                processed_pixmap = self._add_lines_to_pixmap(processed_pixmap)
+            
+            # Scale, display and cache immediately - NO DELAYS
+            final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
+            self.image_label.setPixmap(final_pixmap)
+            
+            # Update cache with complete processed image
+            cache_key = self._get_lut_cache_key()
+            if cache_key:
+                if not hasattr(self, '_lut_process_cache'):
+                    self._lut_process_cache = {}
+                
+                self._lut_process_cache[cache_key] = processed_pixmap.copy()
+                
+                # Manage cache size (keep max 3 processed images for memory)
+                max_cache_size = 3
+                if len(self._lut_process_cache) > max_cache_size:
+                    oldest_key = next(iter(self._lut_process_cache))
+                    del self._lut_process_cache[oldest_key]
+            
+            # Instant completion status
+            processing_time = state['processing_time']
+            final_msg = f"LUT applied: {self.current_lut_name} ({processing_time:.1f}s) - INSTANT completion!"
+            self.status.showMessage(final_msg)
+            
+            # Clear finalization state immediately
+            self._final_processing_state = None
+                
+        except Exception as e:
+            print(f"Error in instant finalization: {e}")
+            import traceback
+            traceback.print_exc()
+            self.status.showMessage("LUT finalization completed with errors")
+            self._final_processing_state = None
+    
+    def _add_lines_to_pixmap(self, pixmap):
+        """Add drawn lines to a pixmap (simplified version for async processing)"""
+        if not pixmap or pixmap.isNull():
+            return pixmap
+            
+        if not (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            return pixmap
+            
+        try:
+            final_pixmap = pixmap.copy()
+            painter = QPainter(final_pixmap)
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            
+            # Use user-selected color and thickness
+            pen_color = self.line_color
+            pen_thickness = self.line_thickness
+            painter.setPen(QPen(pen_color, pen_thickness, Qt.SolidLine))
+            
+            # For async processing, use simple line drawing without complex transformations
+            # This is a fallback - full transformation handling is in display_image
+            
+            # Get basic scale factors (simplified approach)
+            if hasattr(self, 'original_pixmap') and self.original_pixmap:
+                original_size = self.original_pixmap.size()
+                current_size = pixmap.size()
+                scale_x = current_size.width() / original_size.width()
+                scale_y = current_size.height() / original_size.height()
+            else:
+                scale_x = 1.0
+                scale_y = 1.0
+            
+            # Draw simple lines (basic version for async processing)
+            for x in self.drawn_lines:
+                display_x = int(x * scale_x)
+                if 0 <= display_x < final_pixmap.width():
+                    painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+            
+            for y in self.drawn_horizontal_lines:
+                display_y = int(y * scale_y)
+                if 0 <= display_y < final_pixmap.height():
+                    painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+            
+            for line in self.drawn_free_lines:
+                start_x, start_y = line['start']
+                end_x, end_y = line['end']
+                
+                display_start_x = int(start_x * scale_x)
+                display_start_y = int(start_y * scale_y)
+                display_end_x = int(end_x * scale_x)
+                display_end_y = int(end_y * scale_y)
+                
+                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+            
+            painter.end()
+            return final_pixmap
+            
+        except Exception as e:
+            print(f"Error adding lines to pixmap: {e}")
+            return pixmap
+
+    def _display_image_with_lut_preview(self, img_path):
+        """Display image with smart LUT preview handling to prevent freezing"""
+        if self.current_lut and self.lut_strength > 0:
+            # If LUT is active, use instant preview system
+            self.current_image = img_path  # Set this first
+            
+            # Show instant fast preview
+            self.status.showMessage(f"Loading image with {self.current_lut_name}... (instant preview)")
+            QApplication.processEvents()
+            
+            # Create fast preview first
+            self._create_fast_image_lut_preview(img_path)
+            
+            # Then apply full quality in background  
+            QTimer.singleShot(15, lambda: self._apply_full_quality_to_current_image())
+        else:
+            # No LUT active, use normal fast display
+            self.display_image(img_path)
+
+    def _create_fast_image_lut_preview(self, img_path):
+        """Create instant preview for new image with LUT"""
+        try:
+            # Load base image quickly
+            if img_path in self.pixmap_cache:
+                base_pixmap = self.pixmap_cache[img_path]
+            else:
+                base_pixmap, error = safe_load_pixmap(img_path)
+                if error:
+                    self.display_image(img_path)  # Fallback to normal display
+                    return
+                # Cache it for future use
+                self._manage_cache(self.pixmap_cache, img_path, base_pixmap)
+            
+            # Create medium-sized preview for better quality balance
+            preview_size = min(600, base_pixmap.width() // 2, base_pixmap.height() // 2)
+            fast_preview = base_pixmap.scaled(
+                preview_size, preview_size,
+                Qt.KeepAspectRatio, Qt.FastTransformation
+            )
+            
+            # Apply LUT using the main application method
+            if self.current_lut:
+                lut_dict = {
+                    'data': self.current_lut['data'],
+                    'size': self.current_lut['size'],
+                    'file_path': getattr(self.current_lut, 'file_path', 'preview')
+                }
+                fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
+            
+            # Apply basic transformations (rotation, flips)
+            fast_preview = self._apply_quick_transforms(fast_preview)
+            
+            # Scale to display size and show immediately
+            final_preview = self._scale_pixmap(fast_preview, img_path)
+            self.image_label.setPixmap(final_preview)
+            QApplication.processEvents()
+            
+        except Exception as e:
+            print(f"Error creating fast image preview: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to normal display
+            self.display_image(img_path)
+
+    def _apply_quick_transforms(self, pixmap, quality=Qt.FastTransformation):
+        """Apply rotation and flips with specified quality for preview"""
+        if not pixmap or pixmap.isNull():
+            return pixmap
+            
+        # Apply rotation if needed
+        if self.rotation_angle != 0:
+            transform = QTransform()
+            transform.rotate(self.rotation_angle)
+            pixmap = pixmap.transformed(transform, quality)
+        
+        # Apply flips if needed
+        if self.flipped_h:
+            pixmap = pixmap.transformed(QTransform().scale(-1, 1), quality)
+        if self.flipped_v:
+            pixmap = pixmap.transformed(QTransform().scale(1, -1), quality)
+            
+        return pixmap
+
+    def _apply_full_quality_to_current_image(self):
+        """Apply full quality processing to the current image"""
+        if self.current_image:
             self.display_image(self.current_image)
+
+    def _apply_ultra_fast_lut(self, pixmap):
+        """Ultra-fast LUT application for instant preview (sacrifices quality for speed)"""
+        if not self.current_lut or not pixmap or pixmap.isNull():
+            return pixmap
+            
+        try:
+            image = pixmap.toImage()
+            if image.isNull():
+                return pixmap
+                
+            # Convert to fast format
+            if image.format() != image.Format.Format_RGB32:
+                image = image.convertToFormat(image.Format.Format_RGB32)
+            
+            width = image.width()
+            height = image.height()
+            lut_data = self.current_lut['data']
+            lut_size = self.current_lut['size']
+            strength_factor = self.lut_strength / 100.0
+            
+            # Ultra-fast processing: sample every 2nd pixel for better quality preview
+            sample_rate = 2  # Reduced from 4 to 2 for better quality
+            
+            for y in range(0, height, sample_rate):
+                scan_line = image.scanLine(y)
+                
+                for x in range(0, width, sample_rate):
+                    offset = x * 4
+                    
+                    # Read pixel
+                    b = scan_line[offset]
+                    g = scan_line[offset + 1]
+                    r = scan_line[offset + 2]
+                    a = scan_line[offset + 3]
+                    
+                    # Normalize and apply nearest-neighbor LUT lookup
+                    r_norm = r / 255.0
+                    g_norm = g / 255.0
+                    b_norm = b / 255.0
+                    
+                    # Fast nearest-neighbor lookup
+                    lut_result = self._nearest_neighbor_lut(r_norm, g_norm, b_norm, lut_data, lut_size)
+                    
+                    # Blend and write back
+                    final_r = int((r_norm * (1.0 - strength_factor) + lut_result[0] * strength_factor) * 255)
+                    final_g = int((g_norm * (1.0 - strength_factor) + lut_result[1] * strength_factor) * 255)
+                    final_b = int((b_norm * (1.0 - strength_factor) + lut_result[2] * strength_factor) * 255)
+                    
+                    # Clamp values
+                    final_r = max(0, min(255, final_r))
+                    final_g = max(0, min(255, final_g))
+                    final_b = max(0, min(255, final_b))
+                    
+                    # Write to current pixel
+                    scan_line[offset] = final_b
+                    scan_line[offset + 1] = final_g
+                    scan_line[offset + 2] = final_r
+                    scan_line[offset + 3] = a
+                    
+                    # Fill adjacent pixel for smoother result (only horizontally)
+                    if x + 1 < width:
+                        next_offset = (x + 1) * 4
+                        scan_line[next_offset] = final_b
+                        scan_line[next_offset + 1] = final_g
+                        scan_line[next_offset + 2] = final_r
+                        scan_line[next_offset + 3] = scan_line[next_offset + 3]
+                
+                # Fill the next row with same data for smoother preview
+                if y + 1 < height:
+                    next_line = image.scanLine(y + 1)
+                    # Copy current line to next line for smoother blocks
+                    for x in range(0, width, sample_rate):
+                        if x < width:
+                            src_offset = x * 4
+                            # Only copy processed pixels
+                            next_line[src_offset] = scan_line[src_offset]
+                            next_line[src_offset + 1] = scan_line[src_offset + 1]
+                            next_line[src_offset + 2] = scan_line[src_offset + 2]
+                            next_line[src_offset + 3] = scan_line[src_offset + 3]
+                            
+                            # Also copy the adjacent pixel if it exists
+                            if x + 1 < width:
+                                next_src_offset = (x + 1) * 4
+                                next_line[next_src_offset] = scan_line[next_src_offset]
+                                next_line[next_src_offset + 1] = scan_line[next_src_offset + 1]
+                                next_line[next_src_offset + 2] = scan_line[next_src_offset + 2]
+                                next_line[next_src_offset + 3] = scan_line[next_src_offset + 3]
+            
+            return QPixmap.fromImage(image)
+            
+        except Exception as e:
+            print(f"Error in ultra-fast LUT: {e}")
+            return pixmap
+
+    def _nearest_neighbor_lut(self, r, g, b, lut_data, lut_size):
+        """Fastest possible LUT lookup - pure nearest neighbor"""
+        try:
+            # Scale to LUT coordinates
+            r_idx = max(0, min(lut_size - 1, int(r * (lut_size - 1) + 0.5)))
+            g_idx = max(0, min(lut_size - 1, int(g * (lut_size - 1) + 0.5)))
+            b_idx = max(0, min(lut_size - 1, int(b * (lut_size - 1) + 0.5)))
+            
+            # Direct lookup - no interpolation
+            index = r_idx + g_idx * lut_size + b_idx * lut_size * lut_size
+            if 0 <= index < len(lut_data):
+                return lut_data[index]
+            else:
+                return (r, g, b)
+        except:
+            return (r, g, b)
+
+    def _apply_basic_enhancements(self, pixmap):
+        """Apply basic enhancements quickly for preview"""
+        if not pixmap or pixmap.isNull():
+            return pixmap
+            
+        # For fast preview, skip complex enhancements
+        # Just return the LUT-processed pixmap
+        return pixmap
 
     def update_lut_strength(self, value):
-        """Update LUT application strength with fast preview"""
+        """Update LUT application strength with fast preview and async full quality"""
         self.lut_strength = value
         
-        # Clear caches for immediate update
+        # Clear caches for immediate update (including LUT process cache)
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()  # Clear LUT cache when strength changes
         
-        # Show immediate update without heavy processing status
-        if self.current_image:
+        # Show immediate update without heavy processing
+        if self.current_image and self.current_lut:
+            if value > 0:
+                # Show fast preview first
+                self.status.showMessage(f"LUT strength: {value}% (instant preview)")
+                QApplication.processEvents()
+                self._create_fast_lut_preview()
+                
+                # Then apply full quality asynchronously
+                QTimer.singleShot(10, self._apply_full_quality_lut)
+            else:
+                # No LUT strength, use normal display
+                self.display_image(self.current_image)
+                self.status.showMessage("LUT disabled (strength: 0%)")
+        elif self.current_image:
+            # No LUT active, just update normally
             self.display_image(self.current_image)
-        
-        # Update final status
-        if self.current_lut and value > 0:
-            self.status.showMessage(f"LUT strength: {value}%")
-        elif value == 0:
-            self.status.showMessage("LUT disabled (strength: 0%)")
+            if value == 0:
+                self.status.showMessage("LUT disabled (strength: 0%)")
+            else:
+                self.status.showMessage(f"LUT strength: {value}% (no LUT selected)")
 
     def reset_zoom(self):
-        """Reset image zoom and pan to 100%"""
+        """Reset image zoom and pan to 100% with smart LUT caching"""
         if self.image_label:
             self.image_label.reset_zoom()
             if self.current_image:
-                self.display_image(self.current_image)
-            self.status.showMessage("Zoom reset to 100%")
+                self._smart_zoom_display()
+            
+            # Update status with processing awareness
+            if (hasattr(self, '_async_processing_state') and 
+                self._async_processing_state and self.current_lut):
+                progress = (self._async_processing_state['current_row'] / 
+                          self._async_processing_state['total_rows']) * 100
+                lut_name = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+                self.status.showMessage(f"Zoom reset to 100% - {lut_name} processing... {progress:.0f}%")
+            else:
+                self.status.showMessage("Zoom reset to 100%")
 
     def zoom_in(self):
-        """Zoom in by 15%"""
+        """Zoom in by 15% with smart LUT caching"""
         if self.image_label:
             current_zoom = getattr(self.image_label, 'zoom_factor', 1.0)
             new_zoom = min(current_zoom * 1.15, 8.0)
             self.image_label.zoom_factor = new_zoom
             if self.current_image:
-                self.display_image(self.current_image)
-            self.status.showMessage(f"Zoom: {new_zoom:.1f}x")
+                self._smart_zoom_display()
+            
+            # Update status with processing awareness
+            if (hasattr(self, '_async_processing_state') and 
+                self._async_processing_state and self.current_lut):
+                progress = (self._async_processing_state['current_row'] / 
+                          self._async_processing_state['total_rows']) * 100
+                lut_name = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+                self.status.showMessage(f"Zoom: {new_zoom:.1f}x - {lut_name} processing... {progress:.0f}%")
+            else:
+                self.status.showMessage(f"Zoom: {new_zoom:.1f}x")
 
     def zoom_out(self):
-        """Zoom out by 15%"""
+        """Zoom out by 15% with smart LUT caching"""
         if self.image_label:
             current_zoom = getattr(self.image_label, 'zoom_factor', 1.0)
             new_zoom = max(current_zoom / 1.15, 0.1)
             self.image_label.zoom_factor = new_zoom
             if self.current_image:
+                self._smart_zoom_display()
+            
+            # Update status with processing awareness
+            if (hasattr(self, '_async_processing_state') and 
+                self._async_processing_state and self.current_lut):
+                progress = (self._async_processing_state['current_row'] / 
+                          self._async_processing_state['total_rows']) * 100
+                lut_name = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+                self.status.showMessage(f"Zoom: {new_zoom:.1f}x - {lut_name} processing... {progress:.0f}%")
+            else:
+                self.status.showMessage(f"Zoom: {new_zoom:.1f}x")
+    
+    def _smart_zoom_display(self):
+        """Smart zoom display with proper LUT and line handling"""
+        if not self.current_image:
+            return
+            
+        try:
+            # SIMPLIFIED APPROACH: If LUT is active, check cache with proper line handling
+            if self.current_lut and self.lut_strength > 0:
+                cache_key = self._get_lut_cache_key()
+                
+                # Check if we have the EXACT cached combination (including lines)
+                if (hasattr(self, '_lut_process_cache') and 
+                    cache_key in self._lut_process_cache):
+                    
+                    # INSTANT PATH: Perfect cache match - use it directly
+                    cached_pixmap = self._lut_process_cache[cache_key]
+                    
+                    # Apply only non-cached transformations (rotation, flips)
+                    if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                        processed_pixmap = self._apply_cached_transforms(cached_pixmap)
+                    else:
+                        processed_pixmap = cached_pixmap
+                    
+                    # Scale and display - this is instant since LUT+lines are cached
+                    final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
+                    self.image_label.setPixmap(final_pixmap)
+                    
+                    # Show instant status
+                    zoom = getattr(self.image_label, 'zoom_factor', 1.0)
+                    self.status.showMessage(f"Zoom: {zoom:.1f}x (cached)")
+                    return
+                
+                # NO EXACT CACHE MATCH: Use regular display_image for proper processing
+                # This ensures lines are always handled correctly
                 self.display_image(self.current_image)
-            self.status.showMessage(f"Zoom: {new_zoom:.1f}x")
+                return
+            
+            # No LUT active - use normal fast display
+            self.display_image(self.current_image)
+            
+        except Exception as e:
+            print(f"Error in smart zoom display: {e}")
+            # Fallback to normal display
+            self.display_image(self.current_image)
+    
+    def _get_lut_cache_key(self):
+        """Generate cache key for LUT processing - includes lines and enhancements"""
+        if not self.current_lut or not self.current_image:
+            return None
+            
+        # Create comprehensive cache key including all visual modifications
+        lut_file_path = getattr(self.current_lut, 'file_path', 'unknown')
+        
+        # Include line information in cache key
+        lines_key = ""
+        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            # Create a compact representation of all lines
+            vlines = f"v{len(self.drawn_lines)}" if self.drawn_lines else ""
+            hlines = f"h{len(self.drawn_horizontal_lines)}" if self.drawn_horizontal_lines else ""
+            flines = f"f{len(self.drawn_free_lines)}" if self.drawn_free_lines else ""
+            color_key = self.line_color.name()
+            thickness_key = str(self.line_thickness)
+            lines_key = f"_lines_{vlines}{hlines}{flines}_{color_key}_{thickness_key}"
+        
+        # Include enhancement settings in cache key
+        enhancements_key = ""
+        if (self.grayscale_value != 0 or self.contrast_value != 50 or self.gamma_value != 0):
+            enhancements_key = f"_enh_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}"
+        
+        return f"{self.current_image}_{lut_file_path}_{self.lut_strength}{lines_key}{enhancements_key}"
+    
+    def _apply_cached_transforms(self, pixmap):
+        """Apply rotation and flips to cached pixmap"""
+        if not pixmap or pixmap.isNull():
+            return pixmap
+            
+        # Apply rotation if needed
+        if self.rotation_angle != 0:
+            transform = QTransform()
+            transform.rotate(self.rotation_angle)
+            pixmap = pixmap.transformed(transform, Qt.SmoothTransformation)
+        
+        # Apply flips if needed
+        if self.flipped_h:
+            pixmap = pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation)
+        if self.flipped_v:
+            pixmap = pixmap.transformed(QTransform().scale(1, -1), Qt.SmoothTransformation)
+            
+        return pixmap
 
     def flip_horizontal(self):
         """Flip the current image horizontally"""
@@ -3749,7 +4827,7 @@ class RandomImageViewer(QMainWindow):
         if self.history_index > 0:
             self.history_index -= 1
             img_path = self.history[self.history_index]
-            self.display_image(img_path)
+            self._display_image_with_lut_preview(img_path)
             self.current_image = img_path
             self.update_image_info(img_path)
             self.set_status_path(img_path)
@@ -3761,7 +4839,7 @@ class RandomImageViewer(QMainWindow):
         if self.history_index < len(self.history) - 1:
             self.history_index += 1
             img_path = self.history[self.history_index]
-            self.display_image(img_path)
+            self._display_image_with_lut_preview(img_path)
             self.current_image = img_path
             self.update_image_info(img_path)
             self.set_status_path(img_path)
