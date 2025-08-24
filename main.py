@@ -1468,14 +1468,15 @@ class RandomImageViewer(QMainWindow):
                 self.lut_strength_slider.setValue(lut_strength_val)
             
             # Restore LUT selection after recreating combo box
-            if hasattr(self, 'lut_combo') and current_lut_selection != "None":
-                # First populate the combo box if we have a folder selected
+            if hasattr(self, 'lut_combo'):
+                # Always populate the combo box if we have a folder selected
                 if self.lut_folder and self.lut_files:
                     self.update_lut_combo()
-                # Then restore the selection
-                index = self.lut_combo.findText(current_lut_selection)
-                if index >= 0:
-                    self.lut_combo.setCurrentIndex(index)
+                    # Then restore the selection if there was one
+                    if current_lut_selection != "None":
+                        index = self.lut_combo.findText(current_lut_selection)
+                        if index >= 0:
+                            self.lut_combo.setCurrentIndex(index)
             
             # Add History checkbox to slider toolbar
             spacer_before_history = QWidget()
