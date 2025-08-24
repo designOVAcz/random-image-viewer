@@ -1741,6 +1741,16 @@ class RandomImageViewer(QMainWindow):
         self.lut_combo.setFixedWidth(80)
         self.lut_combo.setFixedHeight(24)
         self.lut_combo.setToolTip("Select LUT")
+        # Style the dropdown to be wider when opened
+        self.lut_combo.setStyleSheet("""
+            QComboBox {
+                min-width: 80px;
+            }
+            QComboBox QAbstractItemView {
+                min-width: 200px;
+                max-width: 300px;
+            }
+        """)
         self.lut_combo.currentTextChanged.connect(self.apply_selected_lut)
         toolbar.addWidget(self.lut_combo)
         
@@ -2148,8 +2158,14 @@ class RandomImageViewer(QMainWindow):
         cache_dict[key] = value
 
     def load_cube_lut(self, file_path):
-        """Load a CUBE format LUT file with safety checks"""
+        """Load a CUBE format LUT file with safety checks - OPTIMIZED VERSION"""
         try:
+            # Check LUT cache first for instant loading
+            if file_path in self.lut_cache:
+                print(f"LUT loaded from cache: {os.path.basename(file_path)}")
+                self.status.showMessage(f"LUT loaded from cache: {os.path.basename(file_path)}")
+                return self.lut_cache[file_path]
+            
             # Check file size to prevent loading extremely large LUTs
             file_size = os.path.getsize(file_path)
             max_file_size = 50 * 1024 * 1024  # 50MB limit
@@ -2163,14 +2179,17 @@ class RandomImageViewer(QMainWindow):
             self.status.showMessage(f"Loading LUT: {os.path.basename(file_path)}...")
             QApplication.processEvents()  # Allow UI to update
             
-            with open(file_path, 'r') as f:
-                lines = f.readlines()
+            # OPTIMIZATION 1: Read entire file at once (faster than readlines)
+            with open(file_path, 'r', encoding='utf-8', buffering=8192) as f:
+                content = f.read()
+            
+            # OPTIMIZATION 2: Split lines once and filter in one pass
+            lines = [line.strip() for line in content.split('\n') if line.strip() and not line.strip().startswith('#')]
             
             lut_size = 32  # Default size
-            lut_data = []
             
+            # OPTIMIZATION 3: Find LUT size quickly without parsing every line
             for line in lines:
-                line = line.strip()
                 if line.startswith('LUT_3D_SIZE'):
                     lut_size = int(line.split()[-1])
                     # Safety check for LUT size
@@ -2178,27 +2197,63 @@ class RandomImageViewer(QMainWindow):
                         print(f"LUT size too large: {lut_size} > 256")
                         self.status.showMessage(f"LUT size too large: {lut_size}")
                         return None
-                elif line and not line.startswith('#') and not line.startswith('TITLE') and not line.startswith('LUT_3D_SIZE'):
-                    # Parse RGB values
-                    try:
-                        values = line.split()
-                        if len(values) >= 3:
-                            r, g, b = float(values[0]), float(values[1]), float(values[2])
-                            lut_data.append((r, g, b))
-                    except (ValueError, IndexError):
-                        continue
+                    break
+            
+            # OPTIMIZATION 4: Pre-allocate list for better performance
+            expected_size = lut_size ** 3
+            lut_data = []
+            # Note: Python lists don't have reserve(), but we can hint the expected size
+            
+            # OPTIMIZATION 5: Batch process data lines only (skip metadata)
+            data_lines = [line for line in lines 
+                         if not line.startswith(('TITLE', 'LUT_3D_SIZE', 'DOMAIN_MIN', 'DOMAIN_MAX')) 
+                         and ' ' in line]
+            
+            # OPTIMIZATION 6: Fast parsing with list comprehension and minimal error checking
+            try:
+                for line in data_lines:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        # Direct float conversion - faster than try/except in loop
+                        lut_data.append((float(parts[0]), float(parts[1]), float(parts[2])))
+                        
+                        # Early break when we have enough data
+                        if len(lut_data) >= expected_size:
+                            break
+                            
+            except (ValueError, IndexError) as e:
+                print(f"Error parsing LUT data: {e}")
+                self.status.showMessage(f"Error parsing LUT: {os.path.basename(file_path)}")
+                return None
             
             # Verify we have the expected amount of data
-            expected_size = lut_size ** 3
             if len(lut_data) != expected_size:
                 print(f"Warning: LUT size mismatch. Expected {expected_size}, got {len(lut_data)}")
                 self.status.showMessage(f"Invalid LUT format: {os.path.basename(file_path)}")
                 return None
             
-            return {
+            # OPTIMIZATION 7: Create optimized LUT structure
+            lut_result = {
                 'size': lut_size,
-                'data': lut_data
+                'data': lut_data,
+                'file_path': file_path,  # Store for cache identification
+                'file_size': file_size   # Store for memory management
             }
+            
+            # OPTIMIZATION 8: Cache the loaded LUT for instant reuse
+            self.lut_cache[file_path] = lut_result
+            
+            # OPTIMIZATION 9: Manage cache size to prevent memory issues
+            if len(self.lut_cache) > 10:  # Keep max 10 LUTs cached
+                # Remove oldest cache entries
+                oldest_key = next(iter(self.lut_cache))
+                del self.lut_cache[oldest_key]
+                print(f"LUT cache: Removed {os.path.basename(oldest_key)} to free memory")
+            
+            print(f"LUT loaded successfully: {lut_size}³ ({len(lut_data)} entries)")
+            self.status.showMessage(f"LUT loaded: {os.path.basename(file_path)} ({lut_size}³)")
+            
+            return lut_result
             
         except Exception as e:
             print(f"Error loading CUBE LUT {file_path}: {e}")
