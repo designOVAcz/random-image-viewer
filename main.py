@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QFileDialog, QVBoxLayout, QWidget,
     QListWidget, QListWidgetItem, QSplitter, QSpinBox, QCheckBox,
     QStatusBar, QToolBar, QToolButton, QSizePolicy, QSlider, QHBoxLayout,
-    QStyle, QStyleOptionSlider, QGridLayout, QMenu, QColorDialog
+    QStyle, QStyleOptionSlider, QGridLayout, QMenu, QColorDialog, QComboBox
 )
 from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction, QShortcut
 from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QRect
@@ -993,6 +993,14 @@ class RandomImageViewer(QMainWindow):
         self.flipped_v = False    # Vertical flip state
         self.original_pixmap = None  # Cache original image for fast processing
         self.enhancement_cache = {}  # Cache enhanced versions
+        
+        # LUT (Look-Up Table) support
+        self.current_lut = None   # Currently loaded LUT data
+        self.current_lut_name = "None"  # Name of current LUT
+        self.lut_folder = None    # Folder containing CUBE LUT files
+        self.lut_files = []       # List of available LUT files
+        self.lut_strength = 100   # LUT application strength (0-100%)
+        self.lut_cache = {}       # Cache for loaded LUTs to avoid reloading
 
         self.timer_interval = 60  # seconds
         self.timer_remaining = 0
@@ -1418,6 +1426,12 @@ class RandomImageViewer(QMainWindow):
             history_checked = getattr(self, 'show_history_checkbox', None)
             history_checked = history_checked.isChecked() if history_checked else False
             
+            # Store LUT settings before recreating controls
+            lut_strength_val = getattr(self, 'lut_strength_slider', None)
+            lut_strength_val = lut_strength_val.value() if lut_strength_val else self.lut_strength
+            current_lut_selection = getattr(self, 'lut_combo', None)
+            current_lut_selection = current_lut_selection.currentText() if current_lut_selection else "None"
+            
             # Find and remove enhancement widgets AND action buttons from main toolbar
             actions_to_remove = []
             found_separator = False
@@ -1450,6 +1464,18 @@ class RandomImageViewer(QMainWindow):
                 self.grayscale_slider.setValue(gray_val)
                 self.contrast_slider.setValue(contrast_val)
                 self.gamma_slider.setValue(gamma_val)
+            if hasattr(self, 'lut_strength_slider'):
+                self.lut_strength_slider.setValue(lut_strength_val)
+            
+            # Restore LUT selection after recreating combo box
+            if hasattr(self, 'lut_combo') and current_lut_selection != "None":
+                # First populate the combo box if we have a folder selected
+                if self.lut_folder and self.lut_files:
+                    self.update_lut_combo()
+                # Then restore the selection
+                index = self.lut_combo.findText(current_lut_selection)
+                if index >= 0:
+                    self.lut_combo.setCurrentIndex(index)
             
             # Add History checkbox to slider toolbar
             spacer_before_history = QWidget()
@@ -1486,6 +1512,12 @@ class RandomImageViewer(QMainWindow):
             history_checked = getattr(self, 'show_history_checkbox', None)
             history_checked = history_checked.isChecked() if history_checked else False
             
+            # Store LUT settings before recreating controls
+            lut_strength_val = getattr(self, 'lut_strength_slider', None)
+            lut_strength_val = lut_strength_val.value() if lut_strength_val else self.lut_strength
+            current_lut_selection = getattr(self, 'lut_combo', None)
+            current_lut_selection = current_lut_selection.currentText() if current_lut_selection else "None"
+            
             # Clear and hide slider toolbar
             self.slider_toolbar.clear()
             self.slider_toolbar.hide()
@@ -1504,6 +1536,21 @@ class RandomImageViewer(QMainWindow):
                 self.grayscale_slider.setValue(gray_val)
                 self.contrast_slider.setValue(contrast_val)
                 self.gamma_slider.setValue(gamma_val)
+            
+            # Restore LUT settings
+            if hasattr(self, 'lut_strength_slider'):
+                self.lut_strength_slider.setValue(lut_strength_val)
+            
+            # Restore LUT folder and selection
+            if hasattr(self, 'lut_combo') and self.lut_folder:
+                self.update_lut_combo()  # Repopulate combo box with current folder
+                # Find and restore the previous selection
+                combo_index = self.lut_combo.findText(current_lut_selection)
+                if combo_index >= 0:
+                    self.lut_combo.setCurrentIndex(combo_index)
+                    # Ensure LUT is applied if one was selected
+                    if current_lut_selection != "None":
+                        self.apply_selected_lut(current_lut_selection)
             
             # Add History checkbox back to main toolbar
             self.show_history_checkbox = QCheckBox("History")
@@ -1669,10 +1716,49 @@ class RandomImageViewer(QMainWindow):
         self.gamma_slider.valueChanged.connect(self.update_gamma)
         toolbar.addWidget(self.gamma_slider)
 
-        # Small spacer before reset button
+        # Small spacer between sliders
         spacer3 = QWidget()
-        spacer3.setFixedWidth(6)
+        spacer3.setFixedWidth(4)
         toolbar.addWidget(spacer3)
+
+        # LUT controls
+        lut_label = QLabel("LUT:")
+        lut_label.setFixedWidth(25)
+        lut_label.setStyleSheet("font-size: 9px; margin-right: 2px;")
+        toolbar.addWidget(lut_label)
+        
+        # LUT selection button
+        self.lut_btn = QToolButton()
+        self.lut_btn.setText("📁")
+        self.lut_btn.setToolTip("Select LUT Folder")
+        self.lut_btn.setFixedSize(20, 24)
+        self.lut_btn.clicked.connect(self.choose_lut_folder)
+        toolbar.addWidget(self.lut_btn)
+        
+        # LUT dropdown (combo box)
+        self.lut_combo = QComboBox()
+        self.lut_combo.addItem("None")
+        self.lut_combo.setFixedWidth(80)
+        self.lut_combo.setFixedHeight(24)
+        self.lut_combo.setToolTip("Select LUT")
+        self.lut_combo.currentTextChanged.connect(self.apply_selected_lut)
+        toolbar.addWidget(self.lut_combo)
+        
+        # LUT strength slider
+        self.lut_strength_slider = ClickableSlider(Qt.Horizontal)
+        self.lut_strength_slider.setRange(0, 100)
+        self.lut_strength_slider.setValue(self.lut_strength)
+        self.lut_strength_slider.setFixedWidth(50)
+        self.lut_strength_slider.setFixedHeight(24)
+        self.lut_strength_slider.setStyleSheet("QSlider { margin: 2px 4px; }")
+        self.lut_strength_slider.setToolTip("LUT Strength: 0=Off, 100=Full")
+        self.lut_strength_slider.valueChanged.connect(self.update_lut_strength)
+        toolbar.addWidget(self.lut_strength_slider)
+
+        # Small spacer before reset button
+        spacer4 = QWidget()
+        spacer4.setFixedWidth(6)
+        toolbar.addWidget(spacer4)
 
         # Reset button
         reset_btn = QToolButton()
@@ -1751,7 +1837,7 @@ class RandomImageViewer(QMainWindow):
 
     def display_image(self, img_path):
         # Create cache key including enhancement settings, rotation, and flips
-        cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}_{self.flipped_h}_{self.flipped_v}"
+        cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}_{self.flipped_h}_{self.flipped_v}_{self.current_lut_name}_{self.lut_strength}"
         
         # Check enhanced cache first
         if cache_key in self.enhancement_cache:
@@ -1771,7 +1857,7 @@ class RandomImageViewer(QMainWindow):
                 self._manage_cache(self.pixmap_cache, img_path, base_pixmap)
             
             # Apply enhancements only if needed
-            if self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 0:
+            if self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 0 or (self.current_lut and self.lut_strength > 0):
                 pixmap = self.apply_fast_enhancements(base_pixmap.copy())
             else:
                 pixmap = base_pixmap
@@ -2061,6 +2147,394 @@ class RandomImageViewer(QMainWindow):
                 gc.collect()
         cache_dict[key] = value
 
+    def load_cube_lut(self, file_path):
+        """Load a CUBE format LUT file with safety checks"""
+        try:
+            # Check file size to prevent loading extremely large LUTs
+            file_size = os.path.getsize(file_path)
+            max_file_size = 50 * 1024 * 1024  # 50MB limit
+            
+            if file_size > max_file_size:
+                print(f"LUT file too large: {file_size / (1024*1024):.1f}MB > {max_file_size / (1024*1024):.1f}MB")
+                self.status.showMessage(f"LUT file too large: {os.path.basename(file_path)}")
+                return None
+            
+            # Show loading status
+            self.status.showMessage(f"Loading LUT: {os.path.basename(file_path)}...")
+            QApplication.processEvents()  # Allow UI to update
+            
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+            
+            lut_size = 32  # Default size
+            lut_data = []
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith('LUT_3D_SIZE'):
+                    lut_size = int(line.split()[-1])
+                    # Safety check for LUT size
+                    if lut_size > 256:
+                        print(f"LUT size too large: {lut_size} > 256")
+                        self.status.showMessage(f"LUT size too large: {lut_size}")
+                        return None
+                elif line and not line.startswith('#') and not line.startswith('TITLE') and not line.startswith('LUT_3D_SIZE'):
+                    # Parse RGB values
+                    try:
+                        values = line.split()
+                        if len(values) >= 3:
+                            r, g, b = float(values[0]), float(values[1]), float(values[2])
+                            lut_data.append((r, g, b))
+                    except (ValueError, IndexError):
+                        continue
+            
+            # Verify we have the expected amount of data
+            expected_size = lut_size ** 3
+            if len(lut_data) != expected_size:
+                print(f"Warning: LUT size mismatch. Expected {expected_size}, got {len(lut_data)}")
+                self.status.showMessage(f"Invalid LUT format: {os.path.basename(file_path)}")
+                return None
+            
+            return {
+                'size': lut_size,
+                'data': lut_data
+            }
+            
+        except Exception as e:
+            print(f"Error loading CUBE LUT {file_path}: {e}")
+            self.status.showMessage(f"Error loading LUT: {os.path.basename(file_path)}")
+            return None
+
+    def apply_lut_to_image(self, pixmap, lut, strength=100):
+        """Apply a 3D LUT to a pixmap with specified strength - ULTRA-FAST VERSION"""
+        if not lut or not pixmap or pixmap.isNull():
+            return pixmap
+        
+        try:
+            # For very fast processing, scale down large images aggressively
+            image = pixmap.toImage()
+            if image.isNull():
+                return pixmap
+            
+            original_size = image.size()
+            max_lut_size = 1024  # Even smaller max size for speed
+            
+            # Scale down large images more aggressively
+            if image.width() > max_lut_size or image.height() > max_lut_size:
+                scale_factor = min(max_lut_size / image.width(), max_lut_size / image.height())
+                scaled_size = QSize(int(image.width() * scale_factor), int(image.height() * scale_factor))
+                image = image.scaled(scaled_size, Qt.KeepAspectRatio, Qt.FastTransformation)  # Use FastTransformation
+                is_scaled = True
+            else:
+                is_scaled = False
+            
+            # Convert to RGB32 format for fastest processing
+            if image.format() != image.Format.Format_RGB32:
+                image = image.convertToFormat(image.Format.Format_RGB32)
+            
+            width = image.width()
+            height = image.height()
+            lut_size = lut['size']
+            lut_data = lut['data']
+            strength_factor = strength / 100.0
+            
+            # Use simplified nearest-neighbor LUT lookup for speed
+            # This sacrifices some quality for much better performance
+            if lut_size <= 32:
+                # For smaller LUTs, use fast lookup table approach
+                self._apply_lut_fast_lookup(image, lut_data, lut_size, strength_factor)
+            else:
+                # For larger LUTs, use reduced resolution sampling
+                self._apply_lut_reduced_sampling(image, lut_data, lut_size, strength_factor)
+            
+            # If we scaled down, scale back up to original size
+            if is_scaled:
+                image = image.scaled(original_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            
+            return QPixmap.fromImage(image)
+            
+        except Exception as e:
+            print(f"Error applying LUT: {e}")
+            return pixmap
+
+    def _apply_lut_fast_lookup(self, image, lut_data, lut_size, strength_factor):
+        """Ultra-fast LUT application using lookup tables and nearest neighbor"""
+        width = image.width()
+        height = image.height()
+        
+        # Pre-build lookup table for common colors to avoid repeated calculations
+        # Process in chunks for better cache performance
+        chunk_size = 32  # Process 32 rows at a time
+        
+        for y_start in range(0, height, chunk_size):
+            y_end = min(y_start + chunk_size, height)
+            
+            for y in range(y_start, y_end):
+                scan_line = image.scanLine(y)
+                
+                # Process pixels in groups of 8 for better performance
+                for x in range(0, width, 8):
+                    x_end = min(x + 8, width)
+                    
+                    for px in range(x, x_end):
+                        offset = px * 4
+                        
+                        # Read pixel bytes (BGRA order in Qt)
+                        b = scan_line[offset]
+                        g = scan_line[offset + 1] 
+                        r = scan_line[offset + 2]
+                        
+                        # Use nearest neighbor for speed (no interpolation)
+                        # Quantize to LUT grid directly
+                        lut_r = min(int((r / 255.0) * (lut_size - 1) + 0.5), lut_size - 1)
+                        lut_g = min(int((g / 255.0) * (lut_size - 1) + 0.5), lut_size - 1)
+                        lut_b = min(int((b / 255.0) * (lut_size - 1) + 0.5), lut_size - 1)
+                        
+                        # Direct lookup - no interpolation for speed
+                        idx = lut_r + lut_g * lut_size + lut_b * lut_size * lut_size
+                        if 0 <= idx < len(lut_data):
+                            new_r, new_g, new_b = lut_data[idx]
+                        else:
+                            new_r, new_g, new_b = r / 255.0, g / 255.0, b / 255.0
+                        
+                        # Apply strength blending (simplified)
+                        if strength_factor < 1.0:
+                            orig_r, orig_g, orig_b = r / 255.0, g / 255.0, b / 255.0
+                            new_r = orig_r + (new_r - orig_r) * strength_factor
+                            new_g = orig_g + (new_g - orig_g) * strength_factor
+                            new_b = orig_b + (new_b - orig_b) * strength_factor
+                        
+                        # Convert back and clamp
+                        final_r = max(0, min(255, int(new_r * 255)))
+                        final_g = max(0, min(255, int(new_g * 255)))
+                        final_b = max(0, min(255, int(new_b * 255)))
+                        
+                        # Write back
+                        scan_line[offset] = final_b
+                        scan_line[offset + 1] = final_g
+                        scan_line[offset + 2] = final_r
+
+    def _apply_lut_reduced_sampling(self, image, lut_data, lut_size, strength_factor):
+        """Apply LUT with reduced sampling for very large LUTs"""
+        width = image.width()
+        height = image.height()
+        
+        # For large LUTs, sample every other pixel to maintain speed
+        sample_rate = 2 if lut_size > 64 else 1
+        
+        for y in range(0, height, sample_rate):
+            scan_line = image.scanLine(y)
+            
+            for x in range(0, width, sample_rate):
+                offset = x * 4
+                
+                # Read pixel bytes
+                b = scan_line[offset]
+                g = scan_line[offset + 1] 
+                r = scan_line[offset + 2]
+                
+                # Simple nearest neighbor lookup
+                lut_r = min(int((r / 255.0) * (lut_size - 1)), lut_size - 1)
+                lut_g = min(int((g / 255.0) * (lut_size - 1)), lut_size - 1)
+                lut_b = min(int((b / 255.0) * (lut_size - 1)), lut_size - 1)
+                
+                idx = lut_r + lut_g * lut_size + lut_b * lut_size * lut_size
+                if 0 <= idx < len(lut_data):
+                    new_r, new_g, new_b = lut_data[idx]
+                    
+                    # Apply strength
+                    if strength_factor < 1.0:
+                        orig_r, orig_g, orig_b = r / 255.0, g / 255.0, b / 255.0
+                        new_r = orig_r + (new_r - orig_r) * strength_factor
+                        new_g = orig_g + (new_g - orig_g) * strength_factor
+                        new_b = orig_b + (new_b - orig_b) * strength_factor
+                    
+                    # Convert and write back
+                    final_r = max(0, min(255, int(new_r * 255)))
+                    final_g = max(0, min(255, int(new_g * 255)))
+                    final_b = max(0, min(255, int(new_b * 255)))
+                    
+                    scan_line[offset] = final_b
+                    scan_line[offset + 1] = final_g
+                    scan_line[offset + 2] = final_r
+                    
+                    # Fill in skipped pixels if sampling
+                    if sample_rate > 1:
+                        # Copy to adjacent pixels for smoother result
+                        for dx in range(1, min(sample_rate, width - x)):
+                            next_offset = (x + dx) * 4
+                            scan_line[next_offset] = final_b
+                            scan_line[next_offset + 1] = final_g
+                            scan_line[next_offset + 2] = final_r
+            
+            # Fill in skipped rows if sampling
+            if sample_rate > 1 and y + 1 < height:
+                next_scan_line = image.scanLine(y + 1)
+                # Copy the processed row to the next row for smoother result
+                for i in range(width * 4):
+                    next_scan_line[i] = scan_line[i]
+
+    def _interpolate_lut_fast(self, r, g, b, lut_data, lut_size):
+        """Optimized trilinear interpolation in 3D LUT"""
+        # Scale to LUT coordinate space
+        r_scaled = r * (lut_size - 1)
+        g_scaled = g * (lut_size - 1)
+        b_scaled = b * (lut_size - 1)
+        
+        # Get integer coordinates with bounds checking
+        r_low = max(0, min(int(r_scaled), lut_size - 1))
+        g_low = max(0, min(int(g_scaled), lut_size - 1))
+        b_low = max(0, min(int(b_scaled), lut_size - 1))
+        
+        r_high = min(r_low + 1, lut_size - 1)
+        g_high = min(g_low + 1, lut_size - 1)
+        b_high = min(b_low + 1, lut_size - 1)
+        
+        # Get fractional parts
+        r_frac = r_scaled - r_low
+        g_frac = g_scaled - g_low
+        b_frac = b_scaled - b_low
+        
+        # Pre-calculate indices for better performance
+        try:
+            idx000 = r_low + g_low * lut_size + b_low * lut_size * lut_size
+            idx001 = r_low + g_low * lut_size + b_high * lut_size * lut_size
+            idx010 = r_low + g_high * lut_size + b_low * lut_size * lut_size
+            idx011 = r_low + g_high * lut_size + b_high * lut_size * lut_size
+            idx100 = r_high + g_low * lut_size + b_low * lut_size * lut_size
+            idx101 = r_high + g_low * lut_size + b_high * lut_size * lut_size
+            idx110 = r_high + g_high * lut_size + b_low * lut_size * lut_size
+            idx111 = r_high + g_high * lut_size + b_high * lut_size * lut_size
+            
+            # Get 8 corner values with bounds checking
+            c000 = lut_data[idx000] if 0 <= idx000 < len(lut_data) else (r, g, b)
+            c001 = lut_data[idx001] if 0 <= idx001 < len(lut_data) else (r, g, b)
+            c010 = lut_data[idx010] if 0 <= idx010 < len(lut_data) else (r, g, b)
+            c011 = lut_data[idx011] if 0 <= idx011 < len(lut_data) else (r, g, b)
+            c100 = lut_data[idx100] if 0 <= idx100 < len(lut_data) else (r, g, b)
+            c101 = lut_data[idx101] if 0 <= idx101 < len(lut_data) else (r, g, b)
+            c110 = lut_data[idx110] if 0 <= idx110 < len(lut_data) else (r, g, b)
+            c111 = lut_data[idx111] if 0 <= idx111 < len(lut_data) else (r, g, b)
+            
+            # Trilinear interpolation - optimized calculations
+            # Interpolate along b axis
+            c00_r = c000[0] + (c001[0] - c000[0]) * b_frac
+            c00_g = c000[1] + (c001[1] - c000[1]) * b_frac
+            c00_b = c000[2] + (c001[2] - c000[2]) * b_frac
+            
+            c01_r = c010[0] + (c011[0] - c010[0]) * b_frac
+            c01_g = c010[1] + (c011[1] - c010[1]) * b_frac
+            c01_b = c010[2] + (c011[2] - c010[2]) * b_frac
+            
+            c10_r = c100[0] + (c101[0] - c100[0]) * b_frac
+            c10_g = c100[1] + (c101[1] - c100[1]) * b_frac
+            c10_b = c100[2] + (c101[2] - c100[2]) * b_frac
+            
+            c11_r = c110[0] + (c111[0] - c110[0]) * b_frac
+            c11_g = c110[1] + (c111[1] - c110[1]) * b_frac
+            c11_b = c110[2] + (c111[2] - c110[2]) * b_frac
+            
+            # Interpolate along g axis
+            c0_r = c00_r + (c01_r - c00_r) * g_frac
+            c0_g = c00_g + (c01_g - c00_g) * g_frac
+            c0_b = c00_b + (c01_b - c00_b) * g_frac
+            
+            c1_r = c10_r + (c11_r - c10_r) * g_frac
+            c1_g = c10_g + (c11_g - c10_g) * g_frac
+            c1_b = c10_b + (c11_b - c10_b) * g_frac
+            
+            # Final interpolation along r axis
+            result_r = c0_r + (c1_r - c0_r) * r_frac
+            result_g = c0_g + (c1_g - c0_g) * r_frac
+            result_b = c0_b + (c1_b - c0_b) * r_frac
+            
+            return (result_r, result_g, result_b)
+            
+        except (IndexError, ValueError):
+            # Fallback to original values if interpolation fails
+            return (r, g, b)
+
+    def _interpolate_lut(self, r, g, b, lut_data, lut_size):
+        """Trilinear interpolation in 3D LUT"""
+        # Scale to LUT coordinate space
+        r_scaled = r * (lut_size - 1)
+        g_scaled = g * (lut_size - 1)
+        b_scaled = b * (lut_size - 1)
+        
+        # Get integer coordinates
+        r_low = int(r_scaled)
+        g_low = int(g_scaled)
+        b_low = int(b_scaled)
+        
+        r_high = min(r_low + 1, lut_size - 1)
+        g_high = min(g_low + 1, lut_size - 1)
+        b_high = min(b_low + 1, lut_size - 1)
+        
+        # Get fractional parts
+        r_frac = r_scaled - r_low
+        g_frac = g_scaled - g_low
+        b_frac = b_scaled - b_low
+        
+        # Trilinear interpolation
+        def get_lut_value(ri, gi, bi):
+            index = ri + gi * lut_size + bi * lut_size * lut_size
+            if 0 <= index < len(lut_data):
+                return lut_data[index]
+            return (r, g, b)  # Fallback to original
+        
+        # Get 8 corner values
+        c000 = get_lut_value(r_low, g_low, b_low)
+        c001 = get_lut_value(r_low, g_low, b_high)
+        c010 = get_lut_value(r_low, g_high, b_low)
+        c011 = get_lut_value(r_low, g_high, b_high)
+        c100 = get_lut_value(r_high, g_low, b_low)
+        c101 = get_lut_value(r_high, g_low, b_high)
+        c110 = get_lut_value(r_high, g_high, b_low)
+        c111 = get_lut_value(r_high, g_high, b_high)
+        
+        # Interpolate along each axis
+        def lerp(a, b, t):
+            return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+        
+        # Interpolate along b axis
+        c00 = lerp(c000, c001, b_frac)
+        c01 = lerp(c010, c011, b_frac)
+        c10 = lerp(c100, c101, b_frac)
+        c11 = lerp(c110, c111, b_frac)
+        
+        # Interpolate along g axis
+        c0 = lerp(c00, c01, g_frac)
+        c1 = lerp(c10, c11, g_frac)
+        
+        # Final interpolation along r axis
+        result = lerp(c0, c1, r_frac)
+        
+        return result
+
+    def scan_lut_folder(self, folder_path):
+        """Scan a folder and its subfolders for CUBE LUT files"""
+        if not folder_path or not os.path.exists(folder_path):
+            return []
+        
+        lut_files = []
+        try:
+            # Walk through all subdirectories to find .cube files
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    if file.lower().endswith('.cube'):
+                        full_path = os.path.join(root, file)
+                        lut_files.append(full_path)
+            
+            # Sort files by their basename for better organization
+            lut_files.sort(key=lambda x: os.path.basename(x).lower())
+            
+            print(f"Found {len(lut_files)} CUBE LUT files in {folder_path} and subfolders")
+            
+        except Exception as e:
+            print(f"Error scanning LUT folder: {e}")
+        
+        return lut_files
+
     def apply_fast_enhancements(self, pixmap):
         """Apply fast image enhancements using Qt's optimized color effects."""
         try:
@@ -2220,6 +2694,10 @@ class RandomImageViewer(QMainWindow):
                 
                 painter.end()
                 pixmap = enhanced
+        
+            # Apply LUT if one is loaded
+            if self.current_lut and self.lut_strength > 0:
+                pixmap = self.apply_lut_to_image(pixmap, self.current_lut, self.lut_strength)
         
             return pixmap
         
@@ -2877,9 +3355,22 @@ class RandomImageViewer(QMainWindow):
             self.gamma_slider.setValue(0)
             self.gamma_slider.blockSignals(False)
         
+        if hasattr(self, 'lut_strength_slider') and self.lut_strength_slider is not None:
+            self.lut_strength_slider.blockSignals(True)
+            self.lut_strength_slider.setValue(100)
+            self.lut_strength_slider.blockSignals(False)
+        
+        if hasattr(self, 'lut_combo') and self.lut_combo is not None:
+            self.lut_combo.blockSignals(True)
+            self.lut_combo.setCurrentText("None")
+            self.lut_combo.blockSignals(False)
+        
         self.grayscale_value = 0
         self.contrast_value = 50
         self.gamma_value = 0
+        self.current_lut = None
+        self.current_lut_name = "None"
+        self.lut_strength = 100
         
         # Update toggle button states (block signals to prevent loops)
         if hasattr(self, 'grayscale_toggle_btn') and self.grayscale_toggle_btn is not None:
@@ -2903,6 +3394,141 @@ class RandomImageViewer(QMainWindow):
         self._update_enhancement_menu_states()
         if self.current_image:
             self.display_image(self.current_image)
+
+    def choose_lut_folder(self):
+        """Choose a folder containing CUBE LUT files"""
+        folder = QFileDialog.getExistingDirectory(self, "Select LUT Folder (will search subfolders)")
+        if folder:
+            self.lut_folder = folder
+            
+            # Show scanning status
+            self.status.showMessage(f"Scanning {os.path.basename(folder)} and subfolders for CUBE files...")
+            QApplication.processEvents()  # Allow UI to update
+            
+            self.lut_files = self.scan_lut_folder(folder)
+            self.update_lut_combo()
+            
+            # Count subfolders searched
+            subfolder_count = 0
+            try:
+                for root, dirs, files in os.walk(folder):
+                    if root != folder:  # Don't count the root folder itself
+                        subfolder_count += 1
+            except:
+                subfolder_count = 0
+            
+            if subfolder_count > 0:
+                self.status.showMessage(f"Found {len(self.lut_files)} LUT files in {os.path.basename(folder)} (+{subfolder_count} subfolders)")
+            else:
+                self.status.showMessage(f"Found {len(self.lut_files)} LUT files in {os.path.basename(folder)}")
+
+    def update_lut_combo(self):
+        """Update the LUT combo box with available LUT files"""
+        if hasattr(self, 'lut_combo'):
+            self.lut_combo.blockSignals(True)
+            self.lut_combo.clear()
+            self.lut_combo.addItem("None")
+            
+            for lut_file in self.lut_files:
+                # Create a display name that shows subfolder structure
+                relative_path = os.path.relpath(lut_file, self.lut_folder)
+                
+                # Remove the .cube extension and use forward slashes for consistency
+                display_name = os.path.splitext(relative_path)[0].replace('\\', '/')
+                
+                # If it's just a filename (no subfolder), show only the name
+                if '/' not in display_name:
+                    display_name = os.path.basename(display_name)
+                
+                self.lut_combo.addItem(display_name)
+            
+            self.lut_combo.blockSignals(False)
+
+    def apply_selected_lut(self, lut_name):
+        """Apply the selected LUT from the combo box with fast preview"""
+        if lut_name == "None" or not lut_name:
+            self.current_lut = None
+            self.current_lut_name = "None"
+            self.status.showMessage("LUT disabled")
+        else:
+            # Show loading status immediately
+            self.status.showMessage(f"Loading LUT: {lut_name}...")
+            QApplication.processEvents()  # Allow UI to update
+            
+            # Find the full path for this LUT name (handling subfolder structure)
+            lut_file_found = None
+            for lut_file in self.lut_files:
+                # Create the same display name format as in update_lut_combo
+                relative_path = os.path.relpath(lut_file, self.lut_folder)
+                display_name = os.path.splitext(relative_path)[0].replace('\\', '/')
+                
+                # If it's just a filename (no subfolder), show only the name
+                if '/' not in display_name:
+                    display_name = os.path.basename(display_name)
+                
+                if display_name == lut_name:
+                    lut_file_found = lut_file
+                    break
+            
+            if lut_file_found:
+                # Check if LUT is already cached
+                if hasattr(self, 'lut_cache') and lut_file_found in self.lut_cache:
+                    self.current_lut = self.lut_cache[lut_file_found]
+                    self.current_lut_name = lut_name
+                    lut_size = self.current_lut['size']
+                    self.status.showMessage(f"LUT loaded (cached): {lut_name} ({lut_size}³)")
+                else:
+                    # Load new LUT
+                    self.current_lut = self.load_cube_lut(lut_file_found)
+                    self.current_lut_name = lut_name
+                    
+                    # Cache the loaded LUT
+                    if not hasattr(self, 'lut_cache'):
+                        self.lut_cache = {}
+                    if self.current_lut:
+                        self.lut_cache[lut_file_found] = self.current_lut
+                        lut_size = self.current_lut['size']
+                        self.status.showMessage(f"LUT loaded: {lut_name} ({lut_size}³)")
+                    else:
+                        self.status.showMessage(f"Failed to load LUT: {lut_name}")
+                        self.current_lut_name = "None"
+                        # Reset combo box to "None" if loading failed
+                        if hasattr(self, 'lut_combo'):
+                            self.lut_combo.blockSignals(True)
+                            self.lut_combo.setCurrentText("None")
+                            self.lut_combo.blockSignals(False)
+            else:
+                self.status.showMessage(f"LUT file not found: {lut_name}")
+                self.current_lut = None
+                self.current_lut_name = "None"
+        
+        # Clear caches and update display with fast preview
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        if self.current_image:
+            # Show immediate preview with low quality for responsiveness
+            if self.current_lut:
+                self.status.showMessage(f"Applying {lut_name}... (preview)")
+                QApplication.processEvents()
+            self.display_image(self.current_image)
+
+    def update_lut_strength(self, value):
+        """Update LUT application strength with fast preview"""
+        self.lut_strength = value
+        
+        # Clear caches for immediate update
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        
+        # Show immediate update without heavy processing status
+        if self.current_image:
+            self.display_image(self.current_image)
+        
+        # Update final status
+        if self.current_lut and value > 0:
+            self.status.showMessage(f"LUT strength: {value}%")
+        elif value == 0:
+            self.status.showMessage("LUT disabled (strength: 0%)")
 
     def reset_zoom(self):
         """Reset image zoom and pan to 100%"""
