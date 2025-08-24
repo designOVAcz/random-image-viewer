@@ -24,6 +24,40 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 
 ## 🆕 **Latest Enhancements**
 
+### CUBE LUT Support
+
+**New Features Added:**
+
+#### 🎨 **LUT Controls (in Enhancement Toolbar)**
+- **📁 LUT Folder Button**: Select folder containing .cube LUT files
+- **LUT Dropdown**: Choose from available LUTs (shows "None" + all found LUT names)
+- **LUT Strength Slider**: Control LUT intensity (0-100%)
+
+#### 🔧 **LUT Processing Engine**
+- **CUBE File Parser**: Reads industry-standard .cube LUT files
+- **3D Trilinear Interpolation**: Accurate color transformation
+- **Strength Control**: Blend between original and LUT-processed image
+- **Performance Optimized**: Cached processing for smooth real-time application
+
+#### 🎛️ **Integration Features**
+- **Cache System**: LUT settings included in image cache keys
+- **Reset Support**: LUTs reset when using "Reset Enhancements"
+- **Status Feedback**: Shows LUT loading status and current strength
+- **Enhancement Pipeline**: LUTs applied after contrast/gamma/grayscale
+
+#### 📁 **Usage Workflow**
+1. **Click LUT folder button** 📁 to select folder with .cube files
+2. **Choose LUT** from dropdown (e.g., "Cinematic", "Vintage", "Cold")
+3. **Adjust strength** with slider (0% = off, 100% = full effect)
+4. **See instant results** applied to current image
+
+#### 🎯 **Technical Features**
+- **Support for standard CUBE format** (industry standard for color grading)
+- **Variable LUT sizes** (supports 16x16x16, 32x32x32, 64x64x64, etc.)
+- **Real-time application** with caching for performance
+- **Non-destructive editing** - original image unchanged
+
+
 ### �️ **Fullscreen Mode**
 - **Immersive Viewing**: `⛶` toolbar button and `F11` shortcut for fullscreen
 - **Easy Exit**: Press `Esc` or `F11` to return to windowed mode
@@ -348,6 +382,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
