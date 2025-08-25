@@ -57,6 +57,67 @@ A simple, modern, **cross-platform** desktop app to view random images from any 
 - **Real-time application** with caching for performance
 - **Non-destructive editing** - original image unchanged
 
+### 🚀 GPU-Accelerated 3D LUT Processing (NEW)
+
+Full LUT pipeline now runs on the GPU (OpenCL) for large images with seamless CPU fallback.
+
+#### ✨ Highlights
+* Automatic GPU detection (OpenCL) – uses fastest available GPU; falls back to CPU transparently.
+* Real-time strength blending and trilinear LUT sampling.
+* Zero-copy style upload of image + LUT for minimal overhead.
+* Smart preview system: instant low-cost preview + async full-quality finalize.
+* Lines (vertical / horizontal / free) now persist through LUT, zoom, and pan.
+
+#### 🧠 Implementation Notes
+* Host image memory (Qt `QImage::Format_RGB32`) is BGRA in memory; kernel reads as `uchar4` (x=B, y=G, z=R, w=A).
+* 3D LUT stored as a flat `float` array (r,g,b) — NOT `float3`. (Important: OpenCL often pads `float3` to 16 bytes; using `float3*` caused psychedelic colors until replaced with flat `__global const float*`.)
+* Indexing formula: `index = r + g*size + b*size*size` using integer truncation to mirror CPU path.
+* Strength blending: `final = original*(1-strength) + lut*strength` executed per channel.
+* Kernel caching avoids repeated build & retrieval overhead.
+
+#### 📦 Dependencies
+Install PyOpenCL (plus vendor GPU driver / runtime):
+```sh
+uv pip install pyopencl
+# or
+pip install pyopencl
+```
+If PyOpenCL is missing, the app silently reverts to CPU LUT processing.
+
+#### ⚙️ When GPU Is Used
+| Scenario | Action |
+|----------|-------|
+| Large image (> threshold) | GPU full processing |
+| Lines present | Lower threshold to favor GPU |
+| Small images | CPU may be chosen (overhead not worth it) |
+
+Thresholds auto-tune based on whether lines are visible.
+
+#### 🛠️ Troubleshooting
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Wild / wrong (psychedelic) colors | Old kernel using `float3*` (alignment/padding) | Update to version using flat float LUT buffer |
+| All black output | GPU kernel compiling but LUT strength 0 or invalid LUT size | Check LUT strength slider & ensure .cube loaded |
+| Blue tint after drawing lines | Format mismatch (RGBA vs RGB32) | Ensure image converted to `Format_RGB32` before GPU line kernel |
+| GPU not used | No OpenCL platform or image below threshold | Install drivers / PyOpenCL or enlarge image |
+
+Enable verbose console to confirm messages like:
+```
+Using GPU for async LUT processing (WIDTHxHEIGHT, lines: True)
+GPU LUT processing complete - finalizing...
+```
+
+#### 🧪 Validation Tip
+To verify GPU vs CPU parity: apply a neutral LUT (identity) – output must match original (apart from minor rounding < 1 level).
+
+#### 🔄 Free Line & Zoom Behavior
+Lines are reapplied after each LUT preview/final pass and after zoom/pan via a fast overlay path (`_fast_line_update`). If you still lose free lines, ensure you didn't rotate + disable lines; rotation fallback will trigger a full redraw including lines.
+
+#### 📈 Performance
+Typical speed-up on large 32MP images: multi-second CPU → sub-second GPU (device dependent).
+
+---
+
 
 ### �️ **Fullscreen Mode**
 - **Immersive Viewing**: `⛶` toolbar button and `F11` shortcut for fullscreen
@@ -382,6 +443,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
