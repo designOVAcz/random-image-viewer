@@ -4,6 +4,16 @@ import random
 import time
 import subprocess
 import gc
+import struct
+import numpy as np
+try:
+    import pyopencl as cl
+    GPU_AVAILABLE = True
+    print("GPU acceleration (OpenCL) available")
+except ImportError:
+    cl = None
+    GPU_AVAILABLE = False
+    print("GPU acceleration not available (install pyopencl for GPU support)")
 try:
     import winreg  # For Windows registry access (dark mode detection)
     import ctypes
@@ -17,7 +27,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QToolBar, QToolButton, QSizePolicy, QSlider, QHBoxLayout,
     QStyle, QStyleOptionSlider, QGridLayout, QMenu, QColorDialog, QComboBox
 )
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction, QShortcut
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction, QShortcut, QImage
 from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QRect
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
@@ -505,8 +515,19 @@ class ImageLabel(QLabel):
                     self.pan_offset_y = 0
                     self.zoom_factor = 1.0
                 
-                # Trigger image redisplay with new zoom using smart caching
-                self.parent_viewer._smart_zoom_display()
+                # ZOOM OPTIMIZATION: Use debounced update to prevent excessive processing
+                # during rapid wheel scrolling
+                if hasattr(self.parent_viewer, '_zoom_update_timer'):
+                    self.parent_viewer._zoom_update_timer.stop()
+                else:
+                    self.parent_viewer._zoom_update_timer = QTimer()
+                    self.parent_viewer._zoom_update_timer.setSingleShot(True)
+                    self.parent_viewer._zoom_update_timer.timeout.connect(
+                        self.parent_viewer._smart_zoom_display)
+                
+                # Trigger immediate fast preview, then debounced final update
+                self.parent_viewer._smart_zoom_display()  # Immediate cached display
+                self.parent_viewer._zoom_update_timer.start(100)  # Debounced final update
                 
                 # Update status to show zoom level (but preserve LUT processing status if active)
                 zoom_percent = int(self.zoom_factor * 100)
@@ -605,8 +626,9 @@ class ImageLabel(QLabel):
             # Check if click is within the zoomed image bounds
             if (0 <= rel_x <= zoomed_width and 0 <= rel_y <= zoomed_height):
                 # Convert to display coordinate space using same scale factors as display
-                scale_x = zoomed_width / display_reference_size.width()
-                scale_y = zoomed_height / display_reference_size.height()
+                # Use original image (pre-transform) size for consistent coordinate mapping
+                scale_x = zoomed_width / original_size.width()
+                scale_y = zoomed_height / original_size.height()
                 
                 # Convert to display coordinates (relative to the rotated image)
                 display_x = rel_x / scale_x
@@ -627,16 +649,16 @@ class ImageLabel(QLabel):
                     unrotated_x = display_x
                     unrotated_y = display_y
                 elif rotation == 90:
-                    # Undo 90° clockwise rotation
+                    # Undo 90° clockwise rotation (width/height swapped)
                     unrotated_x = display_y
-                    unrotated_y = display_reference_size.width() - display_x
+                    unrotated_y = original_size.width() - display_x
                 elif rotation == 180:
                     # Undo 180° rotation
-                    unrotated_x = display_reference_size.width() - display_x
-                    unrotated_y = display_reference_size.height() - display_y
+                    unrotated_x = original_size.width() - display_x
+                    unrotated_y = original_size.height() - display_y
                 elif rotation == 270:
                     # Undo 270° clockwise rotation
-                    unrotated_x = display_reference_size.height() - display_y
+                    unrotated_x = original_size.height() - display_y
                     unrotated_y = display_x
                 else:
                     # Fallback for other angles
@@ -958,7 +980,744 @@ class ResponsiveEnhancementWidget(QWidget):
         self.gamma_slider.valueChanged.connect(viewer.update_gamma)
         self.reset_btn.clicked.connect(viewer.reset_enhancements)
 
+class GPULutProcessor:
+    """GPU-accelerated LUT processing using OpenCL"""
+    
+    def __init__(self):
+        self.context = None
+        self.queue = None
+        self.program = None
+        self.device = None
+        self.gpu_enabled = False
+        self.max_buffer_size = 0
+        self._force_reinit = True  # CRITICAL: Force GPU reinit to test reversed indexing formula
+        
+        # Cache kernels to avoid repeated retrieval
+        self._kernel_cache = {}
+        
+        if GPU_AVAILABLE:
+            self._initialize_gpu()
+    
+    def _initialize_gpu(self):
+        """Initialize OpenCL context and compile kernels"""
+        try:
+            # Get available platforms and devices
+            platforms = cl.get_platforms()
+            if not platforms:
+                print("No OpenCL platforms found")
+                return
+            
+            # Try to find a GPU device first, fallback to any device
+            device = None
+            for platform in platforms:
+                try:
+                    devices = platform.get_devices(cl.device_type.GPU)
+                    if devices:
+                        device = devices[0]
+                        print(f"Using GPU: {device.name}")
+                        break
+                except:
+                    continue
+            
+            # If no GPU found, try any device
+            if device is None:
+                for platform in platforms:
+                    try:
+                        devices = platform.get_devices()
+                        if devices:
+                            device = devices[0]
+                            print(f"Using device: {device.name}")
+                            break
+                    except:
+                        continue
+            
+            if device is None:
+                print("No suitable OpenCL device found")
+                return
+            
+            # Create context and command queue
+            self.context = cl.Context([device])
+            self.queue = cl.CommandQueue(self.context)
+            self.device = device
+            
+            # Get device limits
+            self.max_buffer_size = device.max_mem_alloc_size
+            print(f"GPU max buffer size: {self.max_buffer_size // (1024*1024)} MB")
+            
+            # Compile OpenCL kernel
+            kernel_source = self._get_lut_kernel_source()
+            self.program = cl.Program(self.context, kernel_source).build()
+            
+            self.gpu_enabled = True
+            print("GPU LUT processing initialized successfully")
+            
+            # Cache kernels for reuse to avoid repeated retrieval warning
+            self._cache_kernels()
+            
+        except Exception as e:
+            print(f"Failed to initialize GPU: {e}")
+            print("GPU initialization details:")
+            try:
+                import traceback
+                traceback.print_exc()
+                
+                # Try to get more detailed OpenCL information
+                if GPU_AVAILABLE and cl:
+                    platforms = cl.get_platforms()
+                    print(f"Available OpenCL platforms: {len(platforms)}")
+                    for i, platform in enumerate(platforms):
+                        print(f"  Platform {i}: {platform.name}")
+                        try:
+                            devices = platform.get_devices()
+                            print(f"    Devices: {len(devices)}")
+                            for j, device in enumerate(devices):
+                                print(f"      Device {j}: {device.name} ({device.vendor})")
+                        except Exception as dev_e:
+                            print(f"    Error getting devices: {dev_e}")
+                else:
+                    print("OpenCL not available")
+            except Exception as debug_e:
+                print(f"Error getting GPU debug info: {debug_e}")
+            
+            self.gpu_enabled = False
+    
+    def _cache_kernels(self):
+        """Cache OpenCL kernels to avoid repeated retrieval"""
+        if self.program and self.gpu_enabled:
+            try:
+                self._kernel_cache['apply_lut_3d'] = cl.Kernel(self.program, 'apply_lut_3d')
+                self._kernel_cache['draw_lines_gpu'] = cl.Kernel(self.program, 'draw_lines_gpu')
+                print("GPU kernels cached successfully")
+            except Exception as e:
+                print(f"Error caching kernels: {e}")
+    
+    def _get_lut_kernel_source(self):
+        """OpenCL kernel source code for LUT processing"""
+        return """
+        __kernel void apply_lut_3d(
+            __global uchar4* image,
+                // IMPORTANT: use flat float array instead of float3 to avoid 16-byte stride padding issues
+                __global const float* lut_data,
+            const int width,
+            const int height,
+            const int lut_size,
+            const float strength
+        ) {
+            int gid = get_global_id(0);
+            
+            if (gid >= width * height) return;
+            
+            // Get pixel - Qt RGB32 format stores BGRA bytes in memory
+            uchar4 pixel = image[gid];
+            
+            // CONFIRMED: Channel mapping is correct! 
+            // GPU: pixel.x=Blue, pixel.y=Green, pixel.z=Red, pixel.w=Alpha
+            float b = pixel.x / 255.0f;  // Blue
+            float g = pixel.y / 255.0f;  // Green
+            float r = pixel.z / 255.0f;  // Red
+            
+            // Clamp input values
+            r = clamp(r, 0.0f, 1.0f);
+            g = clamp(g, 0.0f, 1.0f);
+            b = clamp(b, 0.0f, 1.0f);
+            
+            // Calculate LUT indices using EXACT CPU formula
+            float r_float = r * (lut_size - 1);
+            float g_float = g * (lut_size - 1);
+            float b_float = b * (lut_size - 1);
+            
+            // Use truncation like CPU
+            int r_idx = max(0, min((int)(r_float), lut_size - 1));
+            int g_idx = max(0, min((int)(g_float), lut_size - 1));
+            int b_idx = max(0, min((int)(b_float), lut_size - 1));
+            
+            // Calculate LUT index using same formula as CPU
+            int lut_index = r_idx + g_idx * lut_size + b_idx * lut_size * lut_size;
+            
+            // Bounds check
+            if (lut_index < 0 || lut_index >= lut_size * lut_size * lut_size) {
+                lut_index = 0;
+            }
+            
+            // Get LUT values - flat RGB triples (r,g,b) tightly packed
+            int base = lut_index * 3;
+            float lut_r = lut_data[base + 0];  // Red
+            float lut_g = lut_data[base + 1];  // Green
+            float lut_b = lut_data[base + 2];  // Blue
+            
+            // Apply strength blending
+            float final_r, final_g, final_b;
+            if (strength < 0.01f) {
+                final_r = r;
+                final_g = g;
+                final_b = b;
+            } else {
+                final_r = r * (1.0f - strength) + lut_r * strength;
+                final_g = g * (1.0f - strength) + lut_g * strength;
+                final_b = b * (1.0f - strength) + lut_b * strength;
+            }
+            
+            // Clamp final values
+            final_r = clamp(final_r, 0.0f, 1.0f);
+            final_g = clamp(final_g, 0.0f, 1.0f);
+            final_b = clamp(final_b, 0.0f, 1.0f);
+            
+            // Write back in correct BGRA format
+            image[gid].x = (uchar)(final_b * 255.0f);  // Blue
+            image[gid].y = (uchar)(final_g * 255.0f);  // Green
+            image[gid].z = (uchar)(final_r * 255.0f);  // Red
+            image[gid].w = 255;  // Alpha
+        }
+        
+        __kernel void draw_lines_gpu(
+            __global uchar4* image,
+            __global int* vertical_lines,
+            __global int* horizontal_lines,
+            __global int4* free_lines,  // start_x, start_y, end_x, end_y
+            const int width,
+            const int height,
+            const int num_vertical,
+            const int num_horizontal,
+            const int num_free,
+            const uchar4 line_color,
+            const int line_thickness
+        ) {
+            int x = get_global_id(0);
+            int y = get_global_id(1);
+            
+            if (x >= width || y >= height) return;
+            
+            int pixel_idx = y * width + x;
+            bool draw_pixel = false;
+            
+            // Check vertical lines
+            for (int i = 0; i < num_vertical; i++) {
+                int line_x = vertical_lines[i];
+                int distance = abs(x - line_x);
+                if (distance <= line_thickness / 2) {
+                    draw_pixel = true;
+                    break;
+                }
+            }
+            
+            // Check horizontal lines
+            if (!draw_pixel) {
+                for (int i = 0; i < num_horizontal; i++) {
+                    int line_y = horizontal_lines[i];
+                    int distance = abs(y - line_y);
+                    if (distance <= line_thickness / 2) {
+                        draw_pixel = true;
+                        break;
+                    }
+                }
+            }
+            
+            // Check free lines (using distance to line segment)
+            if (!draw_pixel) {
+                for (int i = 0; i < num_free; i++) {
+                    int4 line = free_lines[i];
+                    int x1 = line.x, y1 = line.y, x2 = line.z, y2 = line.w;
+                    
+                    // Calculate distance from point to line segment
+                    int dx = x2 - x1;
+                    int dy = y2 - y1;
+                    int line_len_sq = dx * dx + dy * dy;
+                    
+                    if (line_len_sq == 0) {
+                        // Line is actually a point
+                        int dist_sq = (x - x1) * (x - x1) + (y - y1) * (y - y1);
+                        if (dist_sq <= (line_thickness / 2) * (line_thickness / 2)) {
+                            draw_pixel = true;
+                            break;
+                        }
+                    } else {
+                        // Project point onto line segment
+                        int t_num = (x - x1) * dx + (y - y1) * dy;
+                        float t = (float)t_num / line_len_sq;
+                        t = clamp(t, 0.0f, 1.0f);
+                        
+                        int proj_x = x1 + (int)(t * dx);
+                        int proj_y = y1 + (int)(t * dy);
+                        
+                        int dist_sq = (x - proj_x) * (x - proj_x) + (y - proj_y) * (y - proj_y);
+                        if (dist_sq <= (line_thickness / 2) * (line_thickness / 2)) {
+                            draw_pixel = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Draw the pixel if it's part of any line
+            if (draw_pixel) {
+                image[pixel_idx] = line_color;
+            }
+        }
+        """
+    
+    def apply_lut_gpu(self, image, lut_data, lut_size, strength_factor=1.0):
+        """Apply LUT using GPU acceleration"""
+        if not self.gpu_enabled:
+            return None
+            
+        try:
+            width = image.width()
+            height = image.height()
+            total_pixels = width * height
+            
+            # Convert image to numpy array
+            image_array = self._qimage_to_numpy(image)
+            
+            # Convert LUT data to numpy array
+            lut_array = self._prepare_lut_data(lut_data, lut_size)
+            
+            # Optimized for 12GB GPU - conservative thresholds to avoid OUT_OF_RESOURCES
+            image_size_bytes = image_array.nbytes
+            lut_size_bytes = lut_array.nbytes
+            total_size = image_size_bytes + lut_size_bytes
+            
+            # For 12GB GPU, process directly without chunking - simpler and more reliable
+            print(f"Using direct GPU processing for {width}x{height} image ({total_pixels} pixels, {total_size//1024//1024}MB)")
+            return self._apply_lut_full(image_array, lut_array, width, height, lut_size, strength_factor)
+                
+        except Exception as e:
+            print(f"GPU LUT processing failed: {e}")
+            return None
+    
+    def _qimage_to_numpy(self, qimage):
+        """Convert QImage to numpy array for GPU processing"""
+        # Use RGB32 format which is consistent and well-defined
+        if qimage.format() != qimage.Format.Format_RGB32:
+            qimage = qimage.convertToFormat(qimage.Format.Format_RGB32)
+        
+        width = qimage.width()
+        height = qimage.height()
+        
+        # Get raw image data
+        ptr = qimage.constBits()
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4))
+        
+        # Create a copy to ensure it's writable
+        return np.copy(arr)
+    
+    def _prepare_lut_data(self, lut_data, lut_size):
+        """Convert LUT data to GPU format"""
+        # Convert list of tuples to numpy array
+        lut_array = np.array(lut_data, dtype=np.float32)
+        
+        # DEBUG: Print first few LUT values to check data format
+        print(f"LUT DEBUG: First 3 LUT entries:")
+        for i in range(min(3, len(lut_data))):
+            print(f"  LUT[{i}]: {lut_data[i]} -> numpy: {lut_array[i]}")
+        
+        # Ensure it's the right shape for OpenCL float3
+        expected_size = lut_size * lut_size * lut_size
+        if lut_array.shape[0] != expected_size:
+            raise ValueError(f"LUT data size mismatch: expected {expected_size}, got {lut_array.shape[0]}")
+        
+        # Ensure the array is contiguous and properly shaped for float3
+        if lut_array.shape[1] != 3:
+            raise ValueError(f"LUT data should have 3 components (RGB), got {lut_array.shape[1]}")
+        
+        # Make sure the array is C-contiguous for proper GPU transfer
+        lut_array = np.ascontiguousarray(lut_array, dtype=np.float32)
+        
+        print(f"LUT DEBUG: Array shape: {lut_array.shape}, dtype: {lut_array.dtype}, contiguous: {lut_array.flags['C_CONTIGUOUS']}")
+        return lut_array
+    
+    def _apply_lut_full(self, image_array, lut_array, width, height, lut_size, strength_factor):
+        """Apply LUT using full image processing"""
+        try:
+            # Flatten image array for processing
+            image_flat = image_array.reshape(-1, 4).astype(np.uint8)
+            
+            # Create OpenCL buffers
+            image_buffer = cl.Buffer(self.context, cl.mem_flags.READ_WRITE | cl.mem_flags.COPY_HOST_PTR, hostbuf=image_flat)
+            lut_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=lut_array)
+            
+            # Set kernel arguments using cached kernel
+            kernel = self._kernel_cache.get('apply_lut_3d')
+            if not kernel:
+                kernel = cl.Kernel(self.program, 'apply_lut_3d')
+                self._kernel_cache['apply_lut_3d'] = kernel
+            
+            kernel.set_args(image_buffer, lut_buffer, np.int32(width), np.int32(height), np.int32(lut_size), np.float32(strength_factor))
+            
+            # Execute kernel
+            global_size = (width * height,)
+            cl.enqueue_nd_range_kernel(self.queue, kernel, global_size, None)
+            
+            # Read result back
+            result_flat = np.empty_like(image_flat)
+            cl.enqueue_copy(self.queue, result_flat, image_buffer)
+            self.queue.finish()
+            
+            # Reshape back to original form
+            result_array = result_flat.reshape(image_array.shape)
+            
+            # Convert back to QImage
+            return self._numpy_to_qimage(result_array, width, height)
+            
+        except Exception as e:
+            print(f"Full GPU processing error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _apply_lut_chunked(self, image_array, lut_array, width, height, lut_size, strength_factor):
+        """Apply LUT using chunked processing for large images"""
+        try:
+            # Use reasonable chunk size for 12GB GPU - larger chunks for better performance
+            # Process 200 rows at a time for good performance without resource issues
+            rows_per_chunk = 200  # Larger chunks for 12GB GPU
+            
+            print(f"Processing {width}x{height} image in chunks of {rows_per_chunk} rows ({rows_per_chunk * width} pixels per chunk)")
+            
+            # Create LUT buffer once
+            lut_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=lut_array)
+            
+            result_array = np.copy(image_array)
+            
+            # Process in chunks
+            for start_row in range(0, height, rows_per_chunk):
+                end_row = min(start_row + rows_per_chunk, height)
+                chunk_height = end_row - start_row
+                
+                # Extract chunk and flatten for GPU processing
+                chunk_data = image_array[start_row:end_row, :, :].reshape(-1, 4).astype(np.uint8)
+                
+                # Create chunk buffer
+                chunk_buffer = cl.Buffer(self.context, cl.mem_flags.READ_WRITE | cl.mem_flags.COPY_HOST_PTR, hostbuf=chunk_data)
+                
+                # Set kernel arguments for chunked processing using cached kernel
+                kernel = self._kernel_cache.get('apply_lut_chunked')
+                if not kernel:
+                    kernel = cl.Kernel(self.program, 'apply_lut_chunked')
+                    self._kernel_cache['apply_lut_chunked'] = kernel
+                
+                kernel.set_args(chunk_buffer, lut_buffer, np.int32(width), np.int32(height), 
+                               np.int32(lut_size), np.float32(strength_factor), 
+                               np.int32(start_row), np.int32(chunk_height))
+                
+                # Execute kernel with 1D work-group (more compatible)
+                total_pixels = width * chunk_height
+                global_size = (total_pixels,)
+                # Use 1D indexing to avoid work-group size issues
+                cl.enqueue_nd_range_kernel(self.queue, kernel, global_size, None)
+                
+                # Read chunk result back
+                chunk_result_flat = np.empty_like(chunk_data)
+                cl.enqueue_copy(self.queue, chunk_result_flat, chunk_buffer)
+                self.queue.finish()
+                
+                # Reshape and copy back to result
+                chunk_result = chunk_result_flat.reshape((chunk_height, width, 4))
+                result_array[start_row:end_row, :, :] = chunk_result
+            
+            return self._numpy_to_qimage(result_array, width, height)
+            
+        except Exception as e:
+            print(f"Chunked GPU processing error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _numpy_to_qimage(self, array, width, height):
+        """Convert numpy array back to QImage"""
+        # Ensure data is contiguous
+        if not array.flags['C_CONTIGUOUS']:
+            array = np.ascontiguousarray(array)
+        
+        # Create QImage from numpy array using RGB32 format
+        qimage = QImage(array.data, width, height, width * 4, QImage.Format.Format_RGB32)
+        
+        # Return a copy to ensure the data persists
+        return qimage.copy()
+    
+    def draw_lines_gpu(self, image, vertical_lines, horizontal_lines, free_lines, line_color, line_thickness):
+        """Draw lines on image using GPU acceleration"""
+        if not self.gpu_enabled:
+            return None
+            
+        try:
+            width = image.width()
+            height = image.height()
+
+            # Ensure consistent RGB32 (BGRA) format to match kernel expectation
+            if image.format() != image.Format.Format_RGB32:
+                image = image.convertToFormat(image.Format.Format_RGB32)
+            image_array = self._qimage_to_numpy(image)
+            
+            # Prepare line data
+            vertical_array = np.array(vertical_lines, dtype=np.int32) if vertical_lines else np.array([], dtype=np.int32)
+            horizontal_array = np.array(horizontal_lines, dtype=np.int32) if horizontal_lines else np.array([], dtype=np.int32)
+            
+            # Convert free lines to flat array [x1, y1, x2, y2, x1, y1, x2, y2, ...]
+            free_array = np.array([], dtype=np.int32)
+            if free_lines:
+                free_flat = []
+                for line in free_lines:
+                    start_x, start_y = line['start']
+                    end_x, end_y = line['end']
+                    free_flat.extend([int(start_x), int(start_y), int(end_x), int(end_y)])
+                free_array = np.array(free_flat, dtype=np.int32).reshape(-1, 4)
+            
+            # Pack color as BGRA for in-memory layout (Qt RGB32)
+            color_bgra = np.array([line_color.blue(), line_color.green(), line_color.red(), line_color.alpha()], dtype=np.uint8)
+            
+            # Create OpenCL buffers
+            image_flat = image_array.reshape(-1, 4).astype(np.uint8)
+            image_buffer = cl.Buffer(self.context, cl.mem_flags.READ_WRITE | cl.mem_flags.COPY_HOST_PTR, hostbuf=image_flat)
+            
+            # Create buffers for line data (handle empty arrays)
+            if len(vertical_array) > 0:
+                vertical_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=vertical_array)
+            else:
+                vertical_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY, 4)
+                
+            if len(horizontal_array) > 0:
+                horizontal_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=horizontal_array)
+            else:
+                horizontal_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY, 4)
+                
+            if len(free_array) > 0:
+                free_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=free_array)
+            else:
+                free_buffer = cl.Buffer(self.context, cl.mem_flags.READ_ONLY, 16)  # 4 ints
+            
+            # Set kernel arguments using cached kernel to avoid repeated retrieval warning
+            kernel = self._kernel_cache.get('draw_lines_gpu')
+            if not kernel:
+                kernel = cl.Kernel(self.program, 'draw_lines_gpu')
+                self._kernel_cache['draw_lines_gpu'] = kernel
+            kernel.set_arg(0, image_buffer)
+            kernel.set_arg(1, vertical_buffer)
+            kernel.set_arg(2, horizontal_buffer)
+            kernel.set_arg(3, free_buffer)
+            kernel.set_arg(4, np.int32(width))
+            kernel.set_arg(5, np.int32(height))
+            kernel.set_arg(6, np.int32(len(vertical_lines) if vertical_lines else 0))
+            kernel.set_arg(7, np.int32(len(horizontal_lines) if horizontal_lines else 0))
+            kernel.set_arg(8, np.int32(len(free_lines) if free_lines else 0))
+            kernel.set_arg(9, color_bgra)
+            kernel.set_arg(10, np.int32(line_thickness))
+            
+            # Execute kernel
+            global_size = (width, height)
+            cl.enqueue_nd_range_kernel(self.queue, kernel, global_size, None)
+            
+            # Read result back
+            result_array = np.empty_like(image_flat)
+            cl.enqueue_copy(self.queue, result_array, image_buffer)
+            self.queue.finish()
+            
+            # Convert back to QImage (RGB32/BGRA)
+            result_array = result_array.reshape(height, width, 4)
+            result_image = QImage(result_array.data, width, height, width * 4, QImage.Format.Format_RGB32)
+            return QPixmap.fromImage(result_image)
+            
+        except Exception as e:
+            print(f"GPU line drawing failed: {e}")
+            return None
+    
+    def is_available(self):
+        """Check if GPU processing is available, handle reinit if needed"""
+        if hasattr(self, '_force_reinit') and self._force_reinit:
+            print("Reinitializing GPU processor with DEBUG kernels...")
+            self._force_reinit = False
+            self._kernel_cache.clear()  # Clear kernel cache to force recompilation
+            if GPU_AVAILABLE:
+                self._initialize_gpu()
+        return self.gpu_enabled
+    
+    def get_device_info(self):
+        """Get information about the GPU device"""
+        if not self.gpu_enabled or not self.device:
+            return "GPU not available"
+        
+        try:
+            device_name = self.device.name
+            device_vendor = self.device.vendor
+            max_memory = self.device.max_mem_alloc_size // (1024 * 1024)
+            compute_units = self.device.max_compute_units
+            
+            return f"{device_vendor} {device_name} ({max_memory}MB, {compute_units} CUs)"
+        except:
+            return "GPU device info unavailable"
+
+    def cleanup(self):
+        """Clean up GPU resources"""
+        if self.context:
+            self.context = None
+        if self.queue:
+            self.queue = None
+        self.gpu_enabled = False
+
 class RandomImageViewer(QMainWindow):
+    # ...existing code...
+    def _compute_line_transform(self):
+        """Compute scaling and offset for mapping original image coords to current displayed pixmap.
+        Returns dict with scale_x, scale_y, draw_x, draw_y. Only valid when rotation/flips are zero."""
+        try:
+            if not hasattr(self, 'original_pixmap') or not self.original_pixmap:
+                return None
+            if not self.image_label or not self.image_label.pixmap():
+                return None
+            # Only handle no-rotation / no-flip fast path
+            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                return None
+            original_size = self.original_pixmap.size()
+            label_size = self.image_label.size()
+            zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+            # Base scaled size at 100% (aspect fit)
+            base_scaled = self.original_pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            zoomed_width = int(base_scaled.width() * zoom_factor)
+            zoomed_height = int(base_scaled.height() * zoom_factor)
+            draw_x = (label_size.width() - zoomed_width) // 2 + int(getattr(self.image_label, 'pan_offset_x', 0))
+            draw_y = (label_size.height() - zoomed_height) // 2 + int(getattr(self.image_label, 'pan_offset_y', 0))
+            scale_x = zoomed_width / original_size.width() if original_size.width() else 1.0
+            scale_y = zoomed_height / original_size.height() if original_size.height() else 1.0
+            return {
+                'scale_x': scale_x,
+                'scale_y': scale_y,
+                'draw_x': draw_x,
+                'draw_y': draw_y,
+                'zoomed_width': zoomed_width,
+                'zoomed_height': zoomed_height
+            }
+        except Exception as e:
+            print(f"_compute_line_transform error: {e}")
+            return None
+    def _fast_line_update(self):
+        """Fast path to redraw only lines over current displayed image using GPU if available.
+        Falls back to full display_image if prerequisites missing.
+        Assumes self.current_image is path to original image file."""
+        try:
+            if not self.current_image:
+                return
+            if not (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+                return
+            if not self.lines_visible:
+                return
+            # Get currently displayed pixmap (may already have LUT/enhancements applied)
+            current_pixmap = self.image_label.pixmap()
+            if (not current_pixmap) or current_pixmap.isNull():
+                # Fallback: full redraw
+                self.display_image(self.current_image)
+                return
+            # If rotation or flips active, use full display_image for correctness
+            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                self.display_image(self.current_image)
+                return
+            # Use GPU accelerated overlay when possible & image large enough
+            if (hasattr(self, 'gpu_processor') and self.gpu_processor and 
+                self.gpu_processor.is_available() and 
+                current_pixmap.width() * current_pixmap.height() > 100000):
+                # Convert to image in BGRA/rgba format
+                image = current_pixmap.toImage()
+                if image.format() != image.Format.Format_RGBA8888:
+                    image = image.convertToFormat(image.Format.Format_RGBA8888)
+                # Prepare scaled coordinates (since current_pixmap is already scaled/zoomed)
+                # We assume original_pixmap exists to compute scale; if not, fallback
+                if not hasattr(self, 'original_pixmap') or not self.original_pixmap:
+                    self.display_image(self.current_image)
+                    return
+                tx = self._compute_line_transform()
+                if not tx:
+                    self.display_image(self.current_image)
+                    return
+                scale_x = tx['scale_x']; scale_y = tx['scale_y']
+                draw_x = tx['draw_x']; draw_y = tx['draw_y']
+                # If current pixmap already equals zoomed image (no letterbox), ignore draw offsets
+                if current_pixmap.width() == tx['zoomed_width'] and current_pixmap.height() == tx['zoomed_height']:
+                    offset_x = 0; offset_y = 0
+                else:
+                    offset_x = draw_x; offset_y = draw_y
+                scaled_vertical = [int(x * scale_x) + offset_x for x in self.drawn_lines]
+                scaled_horizontal = [int(y * scale_y) + offset_y for y in self.drawn_horizontal_lines]
+                scaled_free = []
+                for line in self.drawn_free_lines:
+                    (sx, sy) = line['start']; (ex, ey) = line['end']
+                    scaled_free.append({'start': (int(sx * scale_x) + offset_x, int(sy * scale_y) + offset_y),
+                                        'end':   (int(ex * scale_x) + offset_x, int(ey * scale_y) + offset_y)})
+                gpu_result = self.gpu_processor.draw_lines_gpu(
+                    image,
+                    scaled_vertical,
+                    scaled_horizontal,
+                    scaled_free,
+                    self.line_color,
+                    self.line_thickness
+                )
+                if gpu_result is not None:
+                    # After GPU draw, verify free lines rendered; if none (possible off-screen), do CPU overlay pass
+                    if self.drawn_free_lines:
+                        overlay = gpu_result.copy()
+                        painter = QPainter(overlay)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        for line in self.drawn_free_lines:
+                            (sx, sy) = line['start']; (ex, ey) = line['end']
+                            painter.drawLine(int(sx * scale_x) + offset_x, int(sy * scale_y) + offset_y,
+                                             int(ex * scale_x) + offset_x, int(ey * scale_y) + offset_y)
+                        painter.end()
+                        self.image_label.setPixmap(overlay)
+                    else:
+                        self.image_label.setPixmap(gpu_result)
+                    return
+            # CPU fallback: manually paint over current_pixmap copy
+            overlay = current_pixmap.copy()
+            painter = QPainter(overlay)
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+            tx = self._compute_line_transform()
+            if tx:
+                scale_x = tx['scale_x']; scale_y = tx['scale_y']
+                draw_x = tx['draw_x']; draw_y = tx['draw_y']
+                if overlay.width() == tx['zoomed_width'] and overlay.height() == tx['zoomed_height']:
+                    offset_x = 0; offset_y = 0
+                else:
+                    offset_x = draw_x; offset_y = draw_y
+                for x in self.drawn_lines:
+                    dx = int(x * scale_x) + offset_x
+                    if 0 <= dx < overlay.width():
+                        painter.drawLine(dx, 0, dx, overlay.height())
+                for y in self.drawn_horizontal_lines:
+                    dy = int(y * scale_y) + offset_y
+                    if 0 <= dy < overlay.height():
+                        painter.drawLine(0, dy, overlay.width(), dy)
+                for line in self.drawn_free_lines:
+                    (sx, sy) = line['start']; (ex, ey) = line['end']
+                    painter.drawLine(int(sx * scale_x) + offset_x, int(sy * scale_y) + offset_y,
+                                     int(ex * scale_x) + offset_x, int(ey * scale_y) + offset_y)
+            else:
+                # Fallback simple proportional scaling
+                if hasattr(self, 'original_pixmap') and self.original_pixmap:
+                    orig_w = self.original_pixmap.width(); orig_h = self.original_pixmap.height()
+                    disp_w = current_pixmap.width(); disp_h = current_pixmap.height()
+                    scale_x = disp_w / orig_w if orig_w else 1.0
+                    scale_y = disp_h / orig_h if orig_h else 1.0
+                else:
+                    scale_x = scale_y = 1.0
+                for x in self.drawn_lines:
+                    dx = int(x * scale_x)
+                    if 0 <= dx < overlay.width():
+                        painter.drawLine(dx, 0, dx, overlay.height())
+                for y in self.drawn_horizontal_lines:
+                    dy = int(y * scale_y)
+                    if 0 <= dy < overlay.height():
+                        painter.drawLine(0, dy, overlay.width(), dy)
+                for line in self.drawn_free_lines:
+                    (sx, sy) = line['start']; (ex, ey) = line['end']
+                    painter.drawLine(int(sx * scale_x), int(sy * scale_y), int(ex * scale_x), int(ey * scale_y))
+            painter.end()
+            self.image_label.setPixmap(overlay)
+        except Exception as e:
+            print(f"_fast_line_update failed: {e}; falling back to full display_image")
+            try:
+                self.display_image(self.current_image)
+            except Exception as e2:
+                print(f"Fallback display_image also failed: {e2}")
+    # ...existing code...
     def __init__(self):
         super().__init__()
         self.setFocusPolicy(Qt.StrongFocus)
@@ -1017,6 +1776,15 @@ class RandomImageViewer(QMainWindow):
         self.lut_files = []       # List of available LUT files
         self.lut_strength = 100   # LUT application strength (0-100%)
         self.lut_cache = {}       # Cache for loaded LUTs to avoid reloading
+        
+        # GPU acceleration
+        self.gpu_processor = GPULutProcessor()
+        # Force complete reinitialization to use corrected kernels
+        self.gpu_processor._force_reinit = True
+        # Also clear any cached kernels to ensure clean reload
+        self.gpu_processor._kernel_cache = {}
+        print(f"GPU Status: {self.gpu_processor.get_device_info()}")
+        print("TEST: Changed LUT indexing from RGB to BGR order")
 
         self.timer_interval = 60  # seconds
         self.timer_remaining = 0
@@ -1393,6 +2161,7 @@ class RandomImageViewer(QMainWindow):
         self.circle_timer = CircularCountdown(self.timer_spin.value())
         self.circle_timer.set_parent_viewer(self)
         toolbar.addWidget(self.circle_timer)
+
 
         spacer = QWidget()
         spacer.setFixedWidth(4)
@@ -1784,7 +2553,6 @@ class RandomImageViewer(QMainWindow):
 
         # Small spacer before reset button
         spacer4 = QWidget()
-        spacer4.setFixedWidth(6)
         toolbar.addWidget(spacer4)
 
         # Reset button
@@ -2370,6 +3138,36 @@ class RandomImageViewer(QMainWindow):
             lut_data = lut['data']
             strength_factor = strength / 100.0
             
+            # GPU ACCELERATION: Try GPU processing first
+            if self.gpu_processor.is_available():
+                print(f"Applying LUT using GPU acceleration ({width}x{height}) - LUT size: {lut_size}³, strength: {strength_factor:.2f}")
+                gpu_result = self.gpu_processor.apply_lut_gpu(image, lut_data, lut_size, strength_factor)
+                if gpu_result is not None:
+                    print("✓ GPU LUT processing successful - colors should now be correct")
+                    # GPU processing successful
+                    if is_scaled:
+                        gpu_result = gpu_result.scaled(original_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    
+                    result_pixmap = QPixmap.fromImage(gpu_result)
+                    
+                    # Smart cache management
+                    max_cache_size = 8 if image_pixels < 1000000 else 4
+                    if len(self._lut_process_cache) > max_cache_size:
+                        oldest_key = next(iter(self._lut_process_cache))
+                        del self._lut_process_cache[oldest_key]
+                    
+                    self._lut_process_cache[cache_key] = result_pixmap
+                    
+                    # ZOOM OPTIMIZATION: Cache the final processed image for fast zoom
+                    self._last_processed_image = gpu_result.copy()
+                    
+                    return result_pixmap
+                else:
+                    print("✗ GPU LUT processing failed, falling back to CPU")
+                    print("GPU processing failed, falling back to CPU")
+            
+            # FALLBACK: CPU processing when GPU is not available or fails
+            
             # Choose processing method based on scaled image size
             scaled_pixels = width * height
             if scaled_pixels > 1500000:  # Still large after scaling
@@ -2393,6 +3191,10 @@ class RandomImageViewer(QMainWindow):
                 del self._lut_process_cache[oldest_key]
             
             self._lut_process_cache[cache_key] = result_pixmap
+            
+            # ZOOM OPTIMIZATION: Cache the final processed image for fast zoom  
+            self._last_processed_image = image.copy()
+            
             return result_pixmap
             
         except Exception as e:
@@ -2400,9 +3202,23 @@ class RandomImageViewer(QMainWindow):
             return pixmap
 
     def clear_lut_cache(self):
-        """Clear LUT processing cache to free memory"""
+        """Clear LUT processing cache to free memory and force GPU recompilation"""
         if hasattr(self, '_lut_process_cache'):
             self._lut_process_cache.clear()
+        
+        # Clear zoom optimization cache
+        if hasattr(self, '_last_processed_image'):
+            self._last_processed_image = None
+        
+        # Also clear enhancement and scaled caches to ensure fresh processing
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        
+        # Force GPU processor to reinitialize on next use
+        if hasattr(self, 'gpu_processor') and self.gpu_processor:
+            self.gpu_processor._force_reinit = True
+        
+        print("All LUT and GPU caches cleared - next LUT application will use fixed GPU kernels")
             
     def _apply_lut_optimized(self, image, lut_data, lut_size, strength_factor):
         """Optimized LUT application - faster but still good quality with progress"""
@@ -3309,8 +4125,8 @@ class RandomImageViewer(QMainWindow):
             self.enhancement_cache.clear()
             self.scaled_cache.clear()
             if self.current_image:
-                # Force full display_image to ensure lines are visible
-                self.display_image(self.current_image)
+                # Use fast GPU-accelerated line update instead of full display_image
+                self._fast_line_update()
 
     def add_hline(self, y_position):
         if y_position not in self.drawn_horizontal_lines:
@@ -3322,8 +4138,8 @@ class RandomImageViewer(QMainWindow):
             self.enhancement_cache.clear()
             self.scaled_cache.clear()
             if self.current_image:
-                # Force full display_image to ensure lines are visible
-                self.display_image(self.current_image)
+                # Use fast GPU-accelerated line update instead of full display_image
+                self._fast_line_update()
 
     def add_free_line_point(self, x, y):
         """Handle clicks for free line drawing - first click sets start, second click completes line"""
@@ -3353,8 +4169,9 @@ class RandomImageViewer(QMainWindow):
             # Reset for next line
             self.current_line_start = None
             
-            # Update display - force full display_image to ensure lines are visible
+            # Update display - use fast GPU-accelerated update instead of full display_image
             if self.current_image:
+                # Use display_image for proper line rendering with GPU acceleration
                 self.display_image(self.current_image)
             
             self.status.showMessage(f"Line drawn from ({start_x:.0f}, {start_y:.0f}) to ({end_x:.0f}, {end_y:.0f})")
@@ -3921,7 +4738,10 @@ class RandomImageViewer(QMainWindow):
                 if error:
                     return
             
-            # SMART PREVIEW SIZING: Adapt quality to display size and zoom level
+            # ENHANCED PREVIEW SIZING: When lines are present, maintain higher quality
+            has_lines = (self.lines_visible and 
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+            
             display_width = self.image_label.width()
             display_height = self.image_label.height()
             zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
@@ -3930,25 +4750,42 @@ class RandomImageViewer(QMainWindow):
             effective_width = int(display_width * zoom_factor)
             effective_height = int(display_height * zoom_factor)
             
-            # For large displays or high zoom, use higher quality preview
-            if effective_width > 1200 or effective_height > 800:
-                # High quality: Use 2/3 of original size for large displays
-                preview_size = min(1200, 
-                                 int(base_pixmap.width() * 0.67), 
-                                 int(base_pixmap.height() * 0.67))
-                transform_quality = Qt.SmoothTransformation  # Better quality for large displays
-            elif effective_width > 800 or effective_height > 600:
-                # Medium quality: Use 1/2 of original size for medium displays
-                preview_size = min(900, 
-                                 base_pixmap.width() // 2, 
-                                 base_pixmap.height() // 2)
-                transform_quality = Qt.SmoothTransformation  # Better quality
+            # IMPROVED QUALITY: Use higher resolution preview when lines are present
+            if has_lines:
+                # When lines are present, use higher quality to maintain line clarity
+                if effective_width > 1200 or effective_height > 800:
+                    # Very high quality for large displays with lines
+                    preview_size = min(1600, 
+                                     int(base_pixmap.width() * 0.8), 
+                                     int(base_pixmap.height() * 0.8))
+                elif effective_width > 800 or effective_height > 600:
+                    # High quality for medium displays with lines
+                    preview_size = min(1200, 
+                                     int(base_pixmap.width() * 0.75), 
+                                     int(base_pixmap.height() * 0.75))
+                else:
+                    # Medium quality for smaller displays with lines
+                    preview_size = min(900, 
+                                     int(base_pixmap.width() * 0.6), 
+                                     int(base_pixmap.height() * 0.6))
+                transform_quality = Qt.SmoothTransformation  # Always use smooth for lines
             else:
-                # Standard quality: Use 1/3 for smaller displays/zoom
-                preview_size = min(600, 
-                                 base_pixmap.width() // 3, 
-                                 base_pixmap.height() // 3)
-                transform_quality = Qt.FastTransformation  # Fast for small displays
+                # Standard quality sizing for no lines
+                if effective_width > 1200 or effective_height > 800:
+                    preview_size = min(1200, 
+                                     int(base_pixmap.width() * 0.67), 
+                                     int(base_pixmap.height() * 0.67))
+                    transform_quality = Qt.SmoothTransformation
+                elif effective_width > 800 or effective_height > 600:
+                    preview_size = min(900, 
+                                     base_pixmap.width() // 2, 
+                                     base_pixmap.height() // 2)
+                    transform_quality = Qt.SmoothTransformation
+                else:
+                    preview_size = min(600, 
+                                     base_pixmap.width() // 3, 
+                                     base_pixmap.height() // 3)
+                    transform_quality = Qt.FastTransformation
             
             # Scale with appropriate quality
             fast_preview = base_pixmap.scaled(
@@ -3956,23 +4793,60 @@ class RandomImageViewer(QMainWindow):
                 Qt.KeepAspectRatio, transform_quality
             )
             
-            # IMPORTANT: Apply LUT using the same method as the main application
-            # Convert to the format expected by apply_lut_to_image
+            # IMPORTANT: Apply LUT using GPU acceleration when available
             lut_dict = {
                 'data': self.current_lut['data'],
                 'size': self.current_lut['size'],
                 'file_path': getattr(self.current_lut, 'file_path', 'preview')
             }
             
-            # Use the existing optimized LUT application method
-            fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
+            # Use GPU acceleration for preview if available - ENHANCED for lines
+            if (self.gpu_processor.is_available() and 
+                fast_preview.width() * fast_preview.height() > 150000) or \
+               (has_lines and self.gpu_processor.is_available() and 
+                fast_preview.width() * fast_preview.height() > 50000):
+                
+                # Force GPU for previews with lines (much lower threshold)
+                print(f"Using GPU for fast LUT preview ({fast_preview.width()}x{fast_preview.height()}, lines: {has_lines})")
+                
+                # Convert pixmap to image for GPU processing
+                preview_image = fast_preview.toImage()
+                if preview_image.format() != preview_image.Format.Format_RGB32:
+                    preview_image = preview_image.convertToFormat(preview_image.Format.Format_RGB32)
+                
+                # Apply LUT using GPU
+                gpu_result = self.gpu_processor.apply_lut_gpu(
+                    preview_image, 
+                    lut_dict['data'], 
+                    lut_dict['size'], 
+                    self.lut_strength / 100.0
+                )
+                
+                if gpu_result is not None:
+                    fast_preview = QPixmap.fromImage(gpu_result)
+                else:
+                    # Fallback to CPU if GPU fails
+                    print("GPU preview failed, falling back to CPU")
+                    fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
+            else:
+                # Use CPU LUT processing for smaller previews
+                fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
             
             # Apply basic transformations (rotation, flips) with appropriate quality
             fast_preview = self._apply_quick_transforms(fast_preview, transform_quality)
             
             # Scale to display size and show immediately
             final_preview = self._scale_pixmap(fast_preview, self.current_image)
-            self.image_label.setPixmap(final_preview)
+            # Apply lines after LUT preview scaling if they should be visible
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)):
+                # Temporarily set pixmap then fast overlay
+                self.image_label.setPixmap(final_preview)
+                if hasattr(self, '_fast_line_update'):
+                    self._fast_line_update()
+                else:
+                    final_preview = self._add_lines_to_pixmap(final_preview)
+            else:
+                self.image_label.setPixmap(final_preview)
             QApplication.processEvents()
             
         except Exception as e:
@@ -4036,6 +4910,68 @@ class RandomImageViewer(QMainWindow):
             if image.format() != image.Format.Format_RGB32:
                 image = image.convertToFormat(image.Format.Format_RGB32)
             
+            # GPU ACCELERATION: Try GPU processing first - LOWER threshold for better performance
+            # Use GPU for any image larger than 250k pixels (500x500) - especially important with lines
+            gpu_threshold = 250000  # Reduced from 500,000 to ensure GPU is used more often
+            
+            # IMPORTANT: Use GPU processing even when lines are present
+            has_lines = (self.lines_visible and 
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+            
+            # If lines are present, FORCE GPU processing for better performance (no freezing)
+            if has_lines:
+                gpu_threshold = 50000  # Very aggressive threshold when lines are present
+                print(f"Lines detected - using very aggressive GPU processing (threshold: {gpu_threshold})")
+            else:
+                gpu_threshold = 150000  # Still lower than default for better performance
+            
+            if self.gpu_processor.is_available() and image.width() * image.height() > gpu_threshold:
+                print(f"Using GPU for async LUT processing ({image.width()}x{image.height()}, lines: {has_lines})")
+                
+                # Use GPU processing
+                lut_data = self.current_lut['data']
+                lut_size = self.current_lut['size']
+                strength_factor = self.lut_strength / 100.0
+                
+                try:
+                    processed_image = self.gpu_processor.apply_lut_gpu(image, lut_data, lut_size, strength_factor)
+                    if processed_image is not None:
+                        # GPU processing successful - convert to pixmap and finalize immediately
+                        processed_pixmap = QPixmap.fromImage(processed_image)
+                        
+                        # Store final processing state for finalization
+                        self._final_processing_state = {
+                            'pixmap': processed_pixmap,
+                            'processing_time': 0.1  # GPU is very fast
+                        }
+                        
+                        # Update status and finalize immediately
+                        if has_lines:
+                            self.status.showMessage("GPU LUT processing complete (with lines) - finalizing...")
+                        else:
+                            self.status.showMessage("GPU LUT processing complete - finalizing...")
+                        QApplication.processEvents()
+                        
+                        # Call finalization directly - no delay needed for GPU
+                        self._async_finalize_step()
+                        return
+                except Exception as e:
+                    print(f"GPU async processing failed: {e}, falling back to CPU")
+            else:
+                # Debug: Show why GPU wasn't used
+                if not self.gpu_processor.is_available():
+                    print("GPU not available - using CPU processing")
+                    print(f"GPU status: {self.gpu_processor.get_device_info()}")
+                else:
+                    print(f"Image too small for GPU processing: {image.width() * image.height()} pixels (threshold: {gpu_threshold}, lines: {has_lines})")
+                    print(f"GPU device available: {self.gpu_processor.get_device_info()}")
+            
+            # FALLBACK: CPU async processing with enhanced chunking when lines are present
+            print(f"Starting CPU async processing (lines present: {has_lines})")
+            
+            # When lines are present, use smaller chunks to prevent freezing
+            chunk_size = 4 if has_lines else 8  # Smaller chunks when lines are present
+            
             # Setup async processing state with cache key tracking
             self._async_processing_state = {
                 'image': image,
@@ -4043,7 +4979,7 @@ class RandomImageViewer(QMainWindow):
                 'height': image.height(),
                 'current_row': 0,
                 'total_rows': image.height(),
-                'chunk_size': 8,  # Process 8 rows at a time for smooth UI
+                'chunk_size': chunk_size,  # Use smaller chunks when lines are present
                 'lut_data': self.current_lut['data'],
                 'lut_size': self.current_lut['size'],
                 'strength_factor': self.lut_strength / 100.0,
@@ -4083,8 +5019,14 @@ class RandomImageViewer(QMainWindow):
             lut_size = state['lut_size']
             strength_factor = state['strength_factor']
             
-            # Process chunk_size rows
+            # Process chunk_size rows with yield points for responsiveness
             end_row = min(current_row + chunk_size, height)
+            
+            # Check if lines are present for more frequent yield points
+            has_lines = (self.lines_visible and 
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+            pixels_processed = 0
+            yield_frequency = 2000 if has_lines else 5000  # More frequent yields with lines
             
             for y in range(current_row, end_row):
                 scan_line = image.scanLine(y)
@@ -4121,6 +5063,13 @@ class RandomImageViewer(QMainWindow):
                     scan_line[offset + 1] = final_g
                     scan_line[offset + 2] = final_r
                     scan_line[offset + 3] = a
+                    
+                    # Yield control more frequently when lines are present
+                    pixels_processed += 1
+                    if pixels_processed >= yield_frequency:
+                        # Allow Qt event processing to prevent freezing
+                        QApplication.processEvents()
+                        pixels_processed = 0
             
             # Update progress
             state['current_row'] = end_row
@@ -4217,6 +5166,9 @@ class RandomImageViewer(QMainWindow):
             # Scale, display and cache immediately - NO DELAYS
             final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
             self.image_label.setPixmap(final_pixmap)
+            # Reapply lines post-scale to avoid being lost by scaling
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)) and hasattr(self, '_fast_line_update'):
+                self._fast_line_update()
             
             # Update cache with complete processed image
             cache_key = self._get_lut_cache_key()
@@ -4248,7 +5200,7 @@ class RandomImageViewer(QMainWindow):
             self._final_processing_state = None
     
     def _add_lines_to_pixmap(self, pixmap):
-        """Add drawn lines to a pixmap (simplified version for async processing)"""
+        """Add drawn lines to a pixmap with GPU acceleration when available"""
         if not pixmap or pixmap.isNull():
             return pixmap
             
@@ -4256,6 +5208,59 @@ class RandomImageViewer(QMainWindow):
             return pixmap
             
         try:
+            # Try GPU acceleration first for better performance
+            if (self.gpu_processor.is_available() and 
+                pixmap.width() * pixmap.height() > 100000):  # Use GPU for images > 100k pixels
+                
+                print(f"Using GPU for line drawing ({pixmap.width()}x{pixmap.height()})")
+                
+                # Prepare line data with proper scaling
+                scale_x = 1.0
+                scale_y = 1.0
+                
+                if hasattr(self, 'original_pixmap') and self.original_pixmap:
+                    original_size = self.original_pixmap.size()
+                    current_size = pixmap.size()
+                    scale_x = current_size.width() / original_size.width()
+                    scale_y = current_size.height() / original_size.height()
+                
+                # Scale line coordinates for GPU
+                scaled_vertical = [int(x * scale_x) for x in self.drawn_lines] if self.drawn_lines else []
+                scaled_horizontal = [int(y * scale_y) for y in self.drawn_horizontal_lines] if self.drawn_horizontal_lines else []
+                
+                scaled_free_lines = []
+                if self.drawn_free_lines:
+                    for line in self.drawn_free_lines:
+                        start_x, start_y = line['start']
+                        end_x, end_y = line['end']
+                        scaled_free_lines.append({
+                            'start': (int(start_x * scale_x), int(start_y * scale_y)),
+                            'end': (int(end_x * scale_x), int(end_y * scale_y))
+                        })
+                
+                # Convert pixmap to image for GPU processing
+                image = pixmap.toImage()
+                if image.format() != image.Format.Format_RGBA8888:
+                    image = image.convertToFormat(image.Format.Format_RGBA8888)
+                
+                # Try GPU line drawing
+                gpu_result = self.gpu_processor.draw_lines_gpu(
+                    image,
+                    scaled_vertical,
+                    scaled_horizontal, 
+                    scaled_free_lines,
+                    self.line_color,
+                    self.line_thickness
+                )
+                
+                if gpu_result is not None:
+                    print("GPU line drawing successful")
+                    return gpu_result
+                else:
+                    print("GPU line drawing failed, falling back to CPU")
+            
+            # Fallback to CPU line drawing
+            print(f"Using CPU for line drawing ({pixmap.width()}x{pixmap.height()})")
             final_pixmap = pixmap.copy()
             painter = QPainter(final_pixmap)
             painter.setRenderHint(QPainter.Antialiasing, False)
@@ -4264,9 +5269,6 @@ class RandomImageViewer(QMainWindow):
             pen_color = self.line_color
             pen_thickness = self.line_thickness
             painter.setPen(QPen(pen_color, pen_thickness, Qt.SolidLine))
-            
-            # For async processing, use simple line drawing without complex transformations
-            # This is a fallback - full transformation handling is in display_image
             
             # Get basic scale factors (simplified approach)
             if hasattr(self, 'original_pixmap') and self.original_pixmap:
@@ -4327,7 +5329,7 @@ class RandomImageViewer(QMainWindow):
             self.display_image(img_path)
 
     def _create_fast_image_lut_preview(self, img_path):
-        """Create instant preview for new image with LUT"""
+        """Create instant preview for new image with LUT - Enhanced GPU quality"""
         try:
             # Load base image quickly
             if img_path in self.pixmap_cache:
@@ -4340,24 +5342,66 @@ class RandomImageViewer(QMainWindow):
                 # Cache it for future use
                 self._manage_cache(self.pixmap_cache, img_path, base_pixmap)
             
-            # Create medium-sized preview for better quality balance
-            preview_size = min(600, base_pixmap.width() // 2, base_pixmap.height() // 2)
+            # ENHANCED PREVIEW: Better quality when lines are present
+            has_lines = (self.lines_visible and 
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+            
+            if has_lines:
+                # Higher quality preview when lines are present
+                preview_size = min(1000, base_pixmap.width() // 1.5, base_pixmap.height() // 1.5)
+                transform_quality = Qt.SmoothTransformation
+            else:
+                # Standard quality for no lines
+                preview_size = min(600, base_pixmap.width() // 2, base_pixmap.height() // 2)
+                transform_quality = Qt.FastTransformation
+            
             fast_preview = base_pixmap.scaled(
                 preview_size, preview_size,
-                Qt.KeepAspectRatio, Qt.FastTransformation
+                Qt.KeepAspectRatio, transform_quality
             )
             
-            # Apply LUT using the main application method
+            # Apply LUT using GPU acceleration when available
             if self.current_lut:
                 lut_dict = {
                     'data': self.current_lut['data'],
                     'size': self.current_lut['size'],
                     'file_path': getattr(self.current_lut, 'file_path', 'preview')
                 }
-                fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
+                
+                # Use GPU for better quality when available - ENHANCED for lines
+                if (self.gpu_processor.is_available() and 
+                    fast_preview.width() * fast_preview.height() > 100000) or \
+                   (has_lines and self.gpu_processor.is_available() and 
+                    fast_preview.width() * fast_preview.height() > 30000):
+                    
+                    # Very aggressive GPU usage when lines are present
+                    print(f"Using GPU for fast image LUT preview ({fast_preview.width()}x{fast_preview.height()}, lines: {has_lines})")
+                    
+                    # Convert pixmap to image for GPU processing
+                    preview_image = fast_preview.toImage()
+                    if preview_image.format() != preview_image.Format.Format_RGB32:
+                        preview_image = preview_image.convertToFormat(preview_image.Format.Format_RGB32)
+                    
+                    # Apply LUT using GPU
+                    gpu_result = self.gpu_processor.apply_lut_gpu(
+                        preview_image, 
+                        lut_dict['data'], 
+                        lut_dict['size'], 
+                        self.lut_strength / 100.0
+                    )
+                    
+                    if gpu_result is not None:
+                        fast_preview = QPixmap.fromImage(gpu_result)
+                    else:
+                        # Fallback to CPU if GPU fails
+                        print("GPU image preview failed, falling back to CPU")
+                        fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
+                else:
+                    # Use CPU LUT processing for smaller previews
+                    fast_preview = self.apply_lut_to_image(fast_preview, lut_dict, self.lut_strength)
             
             # Apply basic transformations (rotation, flips)
-            fast_preview = self._apply_quick_transforms(fast_preview)
+            fast_preview = self._apply_quick_transforms(fast_preview, transform_quality)
             
             # Scale to display size and show immediately
             final_preview = self._scale_pixmap(fast_preview, img_path)
@@ -4572,6 +5616,10 @@ class RandomImageViewer(QMainWindow):
             self.image_label.zoom_factor = new_zoom
             if self.current_image:
                 self._smart_zoom_display()
+                # Reapply lines quickly after zoom
+                if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
+                    and hasattr(self, '_fast_line_update')):
+                    self._fast_line_update()
             
             # Update status with processing awareness
             if (hasattr(self, '_async_processing_state') and 
@@ -4591,6 +5639,9 @@ class RandomImageViewer(QMainWindow):
             self.image_label.zoom_factor = new_zoom
             if self.current_image:
                 self._smart_zoom_display()
+                if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
+                    and hasattr(self, '_fast_line_update')):
+                    self._fast_line_update()
             
             # Update status with processing awareness
             if (hasattr(self, '_async_processing_state') and 
@@ -4603,49 +5654,105 @@ class RandomImageViewer(QMainWindow):
                 self.status.showMessage(f"Zoom: {new_zoom:.1f}x")
     
     def _smart_zoom_display(self):
-        """Smart zoom display with proper LUT and line handling"""
+        """OPTIMIZED zoom display - avoids GPU reprocessing during interactive zoom"""
         if not self.current_image:
             return
             
         try:
-            # SIMPLIFIED APPROACH: If LUT is active, check cache with proper line handling
+            # CRITICAL OPTIMIZATION: During zoom, use the last processed image to avoid GPU calls
+            # This prevents freezing during interactive zoom operations
+            
+            # If we have a recently processed image cached, use it for zoom
+            if (hasattr(self, '_last_processed_image') and 
+                self._last_processed_image and
+                not self._last_processed_image.isNull()):
+                
+                # Use the cached processed image for zoom operations
+                processed_pixmap = QPixmap.fromImage(self._last_processed_image)
+                
+                # Apply transforms if needed (these are fast)
+                if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                    processed_pixmap = self._apply_cached_transforms(processed_pixmap)
+                
+                # Scale and display - FAST operation, no GPU processing
+                final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
+                self.image_label.setPixmap(final_pixmap)
+                # Reapply lines if present
+                if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
+                    and hasattr(self, '_fast_line_update')):
+                    self._fast_line_update()
+                
+                # Show zoom status
+                zoom = getattr(self.image_label, 'zoom_factor', 1.0)
+                self.status.showMessage(f"Zoom: {zoom:.1f}x (GPU cached)")
+                return
+            
+            # If no cached processed image, check LUT cache
             if self.current_lut and self.lut_strength > 0:
                 cache_key = self._get_lut_cache_key()
                 
-                # Check if we have the EXACT cached combination (including lines)
+                # Check if we have cached LUT result
                 if (hasattr(self, '_lut_process_cache') and 
                     cache_key in self._lut_process_cache):
                     
-                    # INSTANT PATH: Perfect cache match - use it directly
                     cached_pixmap = self._lut_process_cache[cache_key]
                     
-                    # Apply only non-cached transformations (rotation, flips)
+                    # Apply transforms if needed
                     if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
                         processed_pixmap = self._apply_cached_transforms(cached_pixmap)
                     else:
                         processed_pixmap = cached_pixmap
                     
-                    # Scale and display - this is instant since LUT+lines are cached
+                    # Scale and display
                     final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
                     self.image_label.setPixmap(final_pixmap)
+                    if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
+                        and hasattr(self, '_fast_line_update')):
+                        self._fast_line_update()
                     
-                    # Show instant status
                     zoom = getattr(self.image_label, 'zoom_factor', 1.0)
-                    self.status.showMessage(f"Zoom: {zoom:.1f}x (cached)")
+                    self.status.showMessage(f"Zoom: {zoom:.1f}x (LUT cached)")
                     return
-                
-                # NO EXACT CACHE MATCH: Use regular display_image for proper processing
-                # This ensures lines are always handled correctly
-                self.display_image(self.current_image)
-                return
             
-            # No LUT active - use normal fast display
-            self.display_image(self.current_image)
+            # Last resort: use original image without LUT processing during zoom
+            # This prevents freezing when no cache is available
+            if self.current_image in self.pixmap_cache:
+                original_pixmap = self.pixmap_cache[self.current_image]
+            else:
+                # Load image as fallback
+                original_pixmap, error = safe_load_pixmap(self.current_image)
+                if error or original_pixmap.isNull():
+                    return  # Can't load image
+            
+            # Apply transforms if needed
+            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                original_pixmap = self._apply_cached_transforms(original_pixmap)
+            
+            # Scale and display original
+            final_pixmap = self._scale_pixmap(original_pixmap, self.current_image)
+            self.image_label.setPixmap(final_pixmap)
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
+                and hasattr(self, '_fast_line_update')):
+                self._fast_line_update()
+            
+            zoom = getattr(self.image_label, 'zoom_factor', 1.0)
+            self.status.showMessage(f"Zoom: {zoom:.1f}x (no LUT during zoom)")
             
         except Exception as e:
             print(f"Error in smart zoom display: {e}")
-            # Fallback to normal display
-            self.display_image(self.current_image)
+            # Emergency fallback - show original image
+            try:
+                if self.current_image in self.pixmap_cache:
+                    original_pixmap = self.pixmap_cache[self.current_image]
+                else:
+                    original_pixmap, error = safe_load_pixmap(self.current_image)
+                    if error or original_pixmap.isNull():
+                        return
+                final_pixmap = self._scale_pixmap(original_pixmap, self.current_image)
+                self.image_label.setPixmap(final_pixmap)
+            except Exception as fallback_e:
+                print(f"Fallback also failed: {fallback_e}")
+                pass
     
     def _get_lut_cache_key(self):
         """Generate cache key for LUT processing - includes lines and enhancements"""
@@ -4876,6 +5983,10 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet(get_adaptive_stylesheet())  # Use OS-adaptive theme
     viewer = RandomImageViewer()
+    
+    # Clear caches to ensure GPU color fixes take effect
+    viewer.clear_lut_cache()
+    print("INFO: GPU LUT color processing has been fixed - BGRA format now handled correctly")
     
     # Apply dark title bar BEFORE showing the window for professional appearance
     if is_windows_dark_mode():
