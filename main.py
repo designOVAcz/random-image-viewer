@@ -162,9 +162,12 @@ def safe_load_pixmap(file_path):
 def get_images_in_folder(folder):
     image_paths = []
     for root, _, files in os.walk(folder):
-        for f in files:
+        # Sort files in each directory to ensure deterministic traversal order
+        for f in sorted(files, key=lambda n: n.lower()):
             if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS:
                 image_paths.append(os.path.join(root, f))
+    # Final global sort so overall list is alphabetical by full path
+    image_paths.sort(key=lambda p: p.lower())
     return image_paths
 
 def emoji_icon(emoji="🎲", size=128):
@@ -1121,29 +1124,54 @@ class GPULutProcessor:
             g = clamp(g, 0.0f, 1.0f);
             b = clamp(b, 0.0f, 1.0f);
             
-            // Calculate LUT indices using EXACT CPU formula
-            float r_float = r * (lut_size - 1);
-            float g_float = g * (lut_size - 1);
-            float b_float = b * (lut_size - 1);
-            
-            // Use truncation like CPU
-            int r_idx = max(0, min((int)(r_float), lut_size - 1));
-            int g_idx = max(0, min((int)(g_float), lut_size - 1));
-            int b_idx = max(0, min((int)(b_float), lut_size - 1));
-            
-            // Calculate LUT index using same formula as CPU
-            int lut_index = r_idx + g_idx * lut_size + b_idx * lut_size * lut_size;
-            
-            // Bounds check
-            if (lut_index < 0 || lut_index >= lut_size * lut_size * lut_size) {
-                lut_index = 0;
-            }
-            
-            // Get LUT values - flat RGB triples (r,g,b) tightly packed
-            int base = lut_index * 3;
-            float lut_r = lut_data[base + 0];  // Red
-            float lut_g = lut_data[base + 1];  // Green
-            float lut_b = lut_data[base + 2];  // Blue
+                // High-quality trilinear interpolation
+                // Position in LUT space (0 .. lut_size-1)
+                float rf = r * (float)(lut_size - 1);
+                float gf = g * (float)(lut_size - 1);
+                float bf = b * (float)(lut_size - 1);
+
+                int r0 = (int)floor(rf); int r1; float fr;
+                if (r0 >= lut_size - 1) { r0 = lut_size - 2; r1 = lut_size - 1; fr = 1.0f; } else { r1 = r0 + 1; fr = rf - (float)r0; }
+                int g0 = (int)floor(gf); int g1; float fg;
+                if (g0 >= lut_size - 1) { g0 = lut_size - 2; g1 = lut_size - 1; fg = 1.0f; } else { g1 = g0 + 1; fg = gf - (float)g0; }
+                int b0 = (int)floor(bf); int b1; float fb;
+                if (b0 >= lut_size - 1) { b0 = lut_size - 2; b1 = lut_size - 1; fb = 1.0f; } else { b1 = b0 + 1; fb = bf - (float)b0; }
+
+                // Helper lambda-like macro to fetch color (r,g,b indices)
+                #define LUT_IDX(R,G,B) (((R) + (G) * lut_size + (B) * lut_size * lut_size) * 3)
+                int i000 = LUT_IDX(r0,g0,b0);
+                int i100 = LUT_IDX(r1,g0,b0);
+                int i010 = LUT_IDX(r0,g1,b0);
+                int i110 = LUT_IDX(r1,g1,b0);
+                int i001 = LUT_IDX(r0,g0,b1);
+                int i101 = LUT_IDX(r1,g0,b1);
+                int i011 = LUT_IDX(r0,g1,b1);
+                int i111 = LUT_IDX(r1,g1,b1);
+
+                float3 c000 = (float3)(lut_data[i000+0], lut_data[i000+1], lut_data[i000+2]);
+                float3 c100 = (float3)(lut_data[i100+0], lut_data[i100+1], lut_data[i100+2]);
+                float3 c010 = (float3)(lut_data[i010+0], lut_data[i010+1], lut_data[i010+2]);
+                float3 c110 = (float3)(lut_data[i110+0], lut_data[i110+1], lut_data[i110+2]);
+                float3 c001 = (float3)(lut_data[i001+0], lut_data[i001+1], lut_data[i001+2]);
+                float3 c101 = (float3)(lut_data[i101+0], lut_data[i101+1], lut_data[i101+2]);
+                float3 c011 = (float3)(lut_data[i011+0], lut_data[i011+1], lut_data[i011+2]);
+                float3 c111 = (float3)(lut_data[i111+0], lut_data[i111+1], lut_data[i111+2]);
+
+                // Interpolate along R
+                float3 c00 = c000 + (c100 - c000) * fr;
+                float3 c10 = c010 + (c110 - c010) * fr;
+                float3 c01 = c001 + (c101 - c001) * fr;
+                float3 c11 = c011 + (c111 - c011) * fr;
+                // Interpolate along G
+                float3 c0 = c00 + (c10 - c00) * fg;
+                float3 c1 = c01 + (c11 - c01) * fg;
+                // Interpolate along B
+                float3 c_final = c0 + (c1 - c0) * fb;
+
+                float lut_r = c_final.x;
+                float lut_g = c_final.y;
+                float lut_b = c_final.z;
+                #undef LUT_IDX
             
             // Apply strength blending
             float final_r, final_g, final_b;
@@ -1796,6 +1824,31 @@ class RandomImageViewer(QMainWindow):
         self.timer.timeout.connect(self._on_timer_tick)
 
         self.init_ui()
+        # Set initial window geometry (width 885 triggers two-row layout below threshold 900)
+        try:
+            self.resize(885, 700)
+        except Exception as _e:
+            pass
+        # Force layout evaluation after initial resize
+        QTimer.singleShot(0, self._delayed_resize)
+        # Auto-set default LUT folder if present
+        # NOTE: trailing backslash in a raw string would escape the quote -> syntax error
+        self.default_lut_path = r"L:\_ART\LUTS"
+        if os.path.isdir(self.default_lut_path):
+            self.lut_folder = self.default_lut_path
+            try:
+                self.lut_files = self.scan_lut_folder(self.default_lut_path)
+                if hasattr(self, 'lut_combo') and self.lut_files:
+                    # Populate combo if empty
+                    self.lut_combo.clear()
+                    self.lut_combo.addItem("None")
+                    for lut_file in self.lut_files:
+                        rel = os.path.relpath(lut_file, self.lut_folder)
+                        self.lut_combo.addItem(rel)
+                    self.current_lut_name = "None"
+                print(f"Default LUT folder loaded: {self.default_lut_path} ({len(self.lut_files)} files)")
+            except Exception as e:
+                print(f"Failed loading default LUT folder {self.default_lut_path}: {e}")
 
     def init_ui(self):
         # Create main toolbar
@@ -1937,235 +1990,52 @@ class RandomImageViewer(QMainWindow):
     def _setup_main_toolbar(self):
         toolbar = self.main_toolbar
 
-        open_btn = QToolButton()
-        open_btn.setText("📁")
-        open_btn.setToolTip("Open Folder")
-        open_btn.setFixedSize(24, 24)
-        open_btn.clicked.connect(self.choose_folder)
-        toolbar.addWidget(open_btn)
+        def add_spacer(width):
+            s = QWidget(); s.setFixedWidth(width); toolbar.addWidget(s)
 
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
+        # Open folder
+        open_btn = QToolButton(); open_btn.setText("📁"); open_btn.setToolTip("Open Folder"); open_btn.setFixedSize(24,24); open_btn.clicked.connect(self.choose_folder); toolbar.addWidget(open_btn)
+        add_spacer(4)
 
-        # Line drawing tool button
-        self.line_tool_btn = QToolButton()
-        self.line_tool_btn.setText("📏")
-        self.line_tool_btn.setToolTip("Draw Vertical Lines")
-        self.line_tool_btn.setCheckable(True)
-        self.line_tool_btn.setFixedSize(24, 24)
-        self.line_tool_btn.toggled.connect(self.toggle_line_drawing)
-        toolbar.addWidget(self.line_tool_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Horizontal line drawing tool button
-        self.hline_tool_btn = QToolButton()
-        self.hline_tool_btn.setText("━")
-        self.hline_tool_btn.setToolTip("Draw Horizontal Lines")
-        self.hline_tool_btn.setCheckable(True)
-        self.hline_tool_btn.setFixedSize(24, 24)
-        self.hline_tool_btn.toggled.connect(self.toggle_hline_drawing)
-        toolbar.addWidget(self.hline_tool_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Free line drawing tool button
-        self.free_line_tool_btn = QToolButton()
-        self.free_line_tool_btn.setText("╱")
-        self.free_line_tool_btn.setToolTip("Draw Free Lines (2 clicks per line)")
-        self.free_line_tool_btn.setCheckable(True)
-        self.free_line_tool_btn.setFixedSize(24, 24)
-        self.free_line_tool_btn.toggled.connect(self.toggle_free_line_drawing)
-        toolbar.addWidget(self.free_line_tool_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Undo last line button
-        self.undo_line_btn = QToolButton()
-        self.undo_line_btn.setText("↶")
-        self.undo_line_btn.setToolTip("Undo Last Line (Remove most recently added line)")
-        self.undo_line_btn.setFixedSize(24, 24)
-        self.undo_line_btn.clicked.connect(self.undo_last_line)
-        toolbar.addWidget(self.undo_line_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Line thickness spinbox
-        self.line_thickness_spin = QSpinBox()
-        self.line_thickness_spin.setRange(1, 10)
-        self.line_thickness_spin.setValue(self.line_thickness)
-        self.line_thickness_spin.setSuffix("px")
-        self.line_thickness_spin.setFixedHeight(24)
-        self.line_thickness_spin.setFixedWidth(50)
-        self.line_thickness_spin.setToolTip("Line Thickness")
-        self.line_thickness_spin.valueChanged.connect(self.update_line_thickness)
-        toolbar.addWidget(self.line_thickness_spin)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Line color picker button
-        self.line_color_btn = QToolButton()
-        self.line_color_btn.setText("🎨")
-        self.line_color_btn.setToolTip("Choose Line Color")
-        self.line_color_btn.setFixedSize(24, 24)
-        self.line_color_btn.clicked.connect(self.choose_line_color)
-        # Set initial background color to show current color
-        self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border: 1px solid #666; }}")
-        toolbar.addWidget(self.line_color_btn)
-
-        # Quick color preset buttons
-        colors = [
-            ("#ffffff", "White", "⚪"),
-            ("#000000", "Black", "⚫"),
-            ("#808080", "Grey", "⚪"),
-        ]
-        
-        for color_hex, color_name, emoji in colors:
-            color_btn = QToolButton()
-            color_btn.setText(emoji)
-            color_btn.setToolTip(f"Set Line Color to {color_name}")
-            color_btn.setFixedSize(18, 24)  # Slightly smaller for presets
-            color_btn.clicked.connect(lambda checked, c=color_hex: self.set_line_color(c))
-            color_btn.setStyleSheet(f"QToolButton {{ border: 1px solid #444; margin: 1px; }}")
-            toolbar.addWidget(color_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Clear lines button
-        clear_lines_btn = QToolButton()
-        clear_lines_btn.setText("🗑")
-        clear_lines_btn.setToolTip("Clear All Lines")
-        clear_lines_btn.setFixedSize(24, 24)
-        clear_lines_btn.clicked.connect(self.clear_lines)
-        toolbar.addWidget(clear_lines_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Toggle line visibility button
-        self.toggle_lines_btn = QToolButton()
-        self.toggle_lines_btn.setText("👁")  # Eye icon for visibility
-        self.toggle_lines_btn.setToolTip("Toggle Line Visibility On/Off")
-        self.toggle_lines_btn.setCheckable(True)
-        self.toggle_lines_btn.setChecked(True)  # Lines visible by default
-        self.toggle_lines_btn.setFixedSize(24, 24)
-        self.toggle_lines_btn.toggled.connect(self.toggle_line_visibility)
-        toolbar.addWidget(self.toggle_lines_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(8)
-        toolbar.addWidget(spacer)
-
-        # Enhancement toggle buttons
-        # Grayscale toggle button
-        self.grayscale_toggle_btn = QToolButton()
-        self.grayscale_toggle_btn.setText("🌑")  # Moon icon for grayscale
-        self.grayscale_toggle_btn.setToolTip("Toggle Grayscale On/Off")
-        self.grayscale_toggle_btn.setCheckable(True)
-        self.grayscale_toggle_btn.setFixedSize(24, 24)
-        self.grayscale_toggle_btn.toggled.connect(self.toggle_grayscale)
-        toolbar.addWidget(self.grayscale_toggle_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Contrast toggle button  
-        self.contrast_toggle_btn = QToolButton()
-        self.contrast_toggle_btn.setText("🔆")  # Sun with rays for contrast
-        self.contrast_toggle_btn.setToolTip("Toggle Enhanced Contrast On/Off")
-        self.contrast_toggle_btn.setCheckable(True)
-        self.contrast_toggle_btn.setFixedSize(24, 24)
-        self.contrast_toggle_btn.toggled.connect(self.toggle_contrast)
-        toolbar.addWidget(self.contrast_toggle_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        # Gamma/brightness toggle button
-        self.gamma_toggle_btn = QToolButton()
-        self.gamma_toggle_btn.setText("💡")  # Light bulb for brightness/gamma
-        self.gamma_toggle_btn.setToolTip("Toggle Enhanced Brightness On/Off")
-        self.gamma_toggle_btn.setCheckable(True)
-        self.gamma_toggle_btn.setFixedSize(24, 24)
-        self.gamma_toggle_btn.toggled.connect(self.toggle_gamma)
-        toolbar.addWidget(self.gamma_toggle_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(8)
-        toolbar.addWidget(spacer)
-
-        # Previous image button (undo image)
-        prev_btn = QToolButton()
-        prev_btn.setText("⬅")
-        prev_btn.setToolTip("Previous Image (Go Back in History)")
-        prev_btn.setFixedSize(24, 24)
-        prev_btn.clicked.connect(self.show_previous_image)
-        toolbar.addWidget(prev_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        next_btn = QToolButton()
-        next_btn.setText("🎲")
-        next_btn.setToolTip("Show Next Random Image")
-        next_btn.setFixedSize(24, 24)
-        next_btn.clicked.connect(self._manual_next_image)
-        toolbar.addWidget(next_btn)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        self.timer_button = QToolButton()
-        self.timer_button.setCheckable(True)
-        self.timer_button.setText("⚡")
-        self.timer_button.setToolTip("Toggle Auto Advance")
-        self.timer_button.setFixedSize(24, 24)
-        self.timer_button.toggled.connect(self.toggle_timer)
-        toolbar.addWidget(self.timer_button)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        self.timer_spin = QSpinBox()
-        self.timer_spin.setRange(1, 3600)
-        self.timer_spin.setValue(self.timer_interval)
-        self.timer_spin.setSuffix(" s")
-        self.timer_spin.setFixedHeight(24)
-        self.timer_spin.setFixedWidth(60)
-        self.timer_spin.valueChanged.connect(self.update_timer_interval)
-        toolbar.addWidget(self.timer_spin)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
-
-        self.circle_timer = CircularCountdown(self.timer_spin.value())
-        self.circle_timer.set_parent_viewer(self)
-        toolbar.addWidget(self.circle_timer)
-
-
-        spacer = QWidget()
-        spacer.setFixedWidth(4)
-        toolbar.addWidget(spacer)
+        # Line tools
+        self.line_tool_btn = QToolButton(); self.line_tool_btn.setText("📏"); self.line_tool_btn.setToolTip("Draw Vertical Lines"); self.line_tool_btn.setCheckable(True); self.line_tool_btn.setFixedSize(24,24); self.line_tool_btn.toggled.connect(self.toggle_line_drawing); toolbar.addWidget(self.line_tool_btn)
+        add_spacer(4)
+        self.hline_tool_btn = QToolButton(); self.hline_tool_btn.setText("━"); self.hline_tool_btn.setToolTip("Draw Horizontal Lines"); self.hline_tool_btn.setCheckable(True); self.hline_tool_btn.setFixedSize(24,24); self.hline_tool_btn.toggled.connect(self.toggle_hline_drawing); toolbar.addWidget(self.hline_tool_btn)
+        add_spacer(4)
+        self.free_line_tool_btn = QToolButton(); self.free_line_tool_btn.setText("╱"); self.free_line_tool_btn.setToolTip("Draw Free Lines (2 clicks per line)"); self.free_line_tool_btn.setCheckable(True); self.free_line_tool_btn.setFixedSize(24,24); self.free_line_tool_btn.toggled.connect(self.toggle_free_line_drawing); toolbar.addWidget(self.free_line_tool_btn)
+        add_spacer(4)
+        self.undo_line_btn = QToolButton(); self.undo_line_btn.setText("↶"); self.undo_line_btn.setToolTip("Undo Last Line"); self.undo_line_btn.setFixedSize(24,24); self.undo_line_btn.clicked.connect(self.undo_last_line); toolbar.addWidget(self.undo_line_btn)
+        add_spacer(4)
+        self.line_thickness_spin = QSpinBox(); self.line_thickness_spin.setRange(1,10); self.line_thickness_spin.setValue(self.line_thickness); self.line_thickness_spin.setSuffix("px"); self.line_thickness_spin.setFixedHeight(24); self.line_thickness_spin.setFixedWidth(50); self.line_thickness_spin.setToolTip("Line Thickness"); self.line_thickness_spin.valueChanged.connect(self.update_line_thickness); toolbar.addWidget(self.line_thickness_spin)
+        add_spacer(4)
+        self.line_color_btn = QToolButton(); self.line_color_btn.setText("🎨"); self.line_color_btn.setToolTip("Choose Line Color"); self.line_color_btn.setFixedSize(24,24); self.line_color_btn.clicked.connect(self.choose_line_color); self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border:1px solid #666; }}"); toolbar.addWidget(self.line_color_btn)
+        for color_hex, color_name, emoji in [("#ffffff","White","⚪"),("#000000","Black","⚫"),("#808080","Grey","⚪")]:
+            btn=QToolButton(); btn.setText(emoji); btn.setToolTip(f"Set Line Color to {color_name}"); btn.setFixedSize(18,24); btn.clicked.connect(lambda checked, c=color_hex: self.set_line_color(c)); btn.setStyleSheet("QToolButton { border:1px solid #444; margin:1px; }"); toolbar.addWidget(btn)
+        add_spacer(4)
+        clear_lines_btn = QToolButton(); clear_lines_btn.setText("🗑"); clear_lines_btn.setToolTip("Clear All Lines"); clear_lines_btn.setFixedSize(24,24); clear_lines_btn.clicked.connect(self.clear_lines); toolbar.addWidget(clear_lines_btn)
+        add_spacer(4)
+        self.toggle_lines_btn = QToolButton(); self.toggle_lines_btn.setText("👁"); self.toggle_lines_btn.setToolTip("Toggle Line Visibility On/Off"); self.toggle_lines_btn.setCheckable(True); self.toggle_lines_btn.setChecked(True); self.toggle_lines_btn.setFixedSize(24,24); self.toggle_lines_btn.toggled.connect(self.toggle_line_visibility); toolbar.addWidget(self.toggle_lines_btn)
+        add_spacer(8)
+        # Enhancement toggles
+        self.grayscale_toggle_btn = QToolButton(); self.grayscale_toggle_btn.setText("🌑"); self.grayscale_toggle_btn.setToolTip("Toggle Grayscale On/Off"); self.grayscale_toggle_btn.setCheckable(True); self.grayscale_toggle_btn.setFixedSize(24,24); self.grayscale_toggle_btn.toggled.connect(self.toggle_grayscale); toolbar.addWidget(self.grayscale_toggle_btn)
+        add_spacer(4)
+        self.contrast_toggle_btn = QToolButton(); self.contrast_toggle_btn.setText("🔆"); self.contrast_toggle_btn.setToolTip("Toggle Enhanced Contrast On/Off"); self.contrast_toggle_btn.setCheckable(True); self.contrast_toggle_btn.setFixedSize(24,24); self.contrast_toggle_btn.toggled.connect(self.toggle_contrast); toolbar.addWidget(self.contrast_toggle_btn)
+        add_spacer(4)
+        self.gamma_toggle_btn = QToolButton(); self.gamma_toggle_btn.setText("💡"); self.gamma_toggle_btn.setToolTip("Toggle Enhanced Brightness On/Off"); self.gamma_toggle_btn.setCheckable(True); self.gamma_toggle_btn.setFixedSize(24,24); self.gamma_toggle_btn.toggled.connect(self.toggle_gamma); toolbar.addWidget(self.gamma_toggle_btn)
+        # LUT toggle
+        self.lut_toggle_btn = QToolButton(); self.lut_toggle_btn.setText("🎞"); self.lut_toggle_btn.setToolTip("Toggle LUT On/Off (preserves selection)"); self.lut_toggle_btn.setCheckable(True); self.lut_toggle_btn.setFixedSize(24,24); self.lut_toggle_btn.toggled.connect(self.toggle_lut_enabled); self.lut_toggle_btn.setChecked(False); toolbar.addWidget(self.lut_toggle_btn)
+        add_spacer(8)
+        # Navigation & timer
+        prev_btn = QToolButton(); prev_btn.setText("⬅"); prev_btn.setToolTip("Previous Image (Go Back in History)"); prev_btn.setFixedSize(24,24); prev_btn.clicked.connect(self.show_previous_image); toolbar.addWidget(prev_btn)
+        add_spacer(4)
+        next_btn = QToolButton(); next_btn.setText("🎲"); next_btn.setToolTip("Show Next Random Image"); next_btn.setFixedSize(24,24); next_btn.clicked.connect(self._manual_next_image); toolbar.addWidget(next_btn)
+        add_spacer(4)
+        self.timer_button = QToolButton(); self.timer_button.setCheckable(True); self.timer_button.setText("⚡"); self.timer_button.setToolTip("Toggle Auto Advance"); self.timer_button.setFixedSize(24,24); self.timer_button.toggled.connect(self.toggle_timer); toolbar.addWidget(self.timer_button)
+        add_spacer(4)
+        self.timer_spin = QSpinBox(); self.timer_spin.setRange(1,3600); self.timer_spin.setValue(self.timer_interval); self.timer_spin.setSuffix(" s"); self.timer_spin.setFixedHeight(24); self.timer_spin.setFixedWidth(60); self.timer_spin.valueChanged.connect(self.update_timer_interval); toolbar.addWidget(self.timer_spin)
+        add_spacer(4)
+        self.circle_timer = CircularCountdown(self.timer_spin.value()); self.circle_timer.set_parent_viewer(self); toolbar.addWidget(self.circle_timer)
+        add_spacer(4)
 
     def _setup_enhancement_controls(self):
         """Setup the enhancement controls - put them on main toolbar initially"""
@@ -3663,8 +3533,17 @@ class RandomImageViewer(QMainWindow):
                         full_path = os.path.join(root, file)
                         lut_files.append(full_path)
             
-            # Sort files by their basename for better organization
-            lut_files.sort(key=lambda x: os.path.basename(x).lower())
+            # Sort: first by first-level folder (relative to root), then by filename
+            def lut_sort_key(full_path):
+                rel = os.path.relpath(full_path, folder_path)
+                parts = rel.split(os.sep)
+                if len(parts) == 1:
+                    # File directly in root: group key empty so it appears before folder groups
+                    return ("", parts[0].lower())
+                first_folder = parts[0].lower()
+                filename = parts[-1].lower()
+                return (first_folder, filename)
+            lut_files.sort(key=lut_sort_key)
             
             print(f"Found {len(lut_files)} CUBE LUT files in {folder_path} and subfolders")
             
@@ -4601,7 +4480,17 @@ class RandomImageViewer(QMainWindow):
 
     def choose_lut_folder(self):
         """Choose a folder containing CUBE LUT files"""
-        folder = QFileDialog.getExistingDirectory(self, "Select LUT Folder (will search subfolders)")
+        # Prefer previously chosen LUT folder; else default LUT path; else ONLY then fall back to image folder
+        if self.lut_folder and os.path.isdir(self.lut_folder):
+            start_dir = self.lut_folder
+        elif hasattr(self, 'default_lut_path') and self.default_lut_path and os.path.isdir(self.default_lut_path):
+            start_dir = self.default_lut_path
+        elif self.folder and os.path.isdir(self.folder):
+            start_dir = self.folder  # final fallback
+        else:
+            start_dir = ""
+
+        folder = QFileDialog.getExistingDirectory(self, "Select LUT Folder (will search subfolders)", start_dir)
         if folder:
             self.lut_folder = folder
             
@@ -4654,6 +4543,11 @@ class RandomImageViewer(QMainWindow):
             self.current_lut = None
             self.current_lut_name = "None"
             self.status.showMessage("LUT disabled")
+            # Sync toggle button state
+            if hasattr(self, 'lut_toggle_btn'):
+                self.lut_toggle_btn.blockSignals(True)
+                self.lut_toggle_btn.setChecked(False)
+                self.lut_toggle_btn.blockSignals(False)
         else:
             # Show loading status immediately
             self.status.showMessage(f"Loading LUT: {lut_name}...")
@@ -4705,6 +4599,11 @@ class RandomImageViewer(QMainWindow):
                 self.status.showMessage(f"LUT file not found: {lut_name}")
                 self.current_lut = None
                 self.current_lut_name = "None"
+            # Sync toggle button state when a LUT successfully loaded
+            if self.current_lut_name != "None" and hasattr(self, 'lut_toggle_btn'):
+                self.lut_toggle_btn.blockSignals(True)
+                self.lut_toggle_btn.setChecked(True)
+                self.lut_toggle_btn.blockSignals(False)
         
         # Clear caches and update display with progressive preview
         self.enhancement_cache.clear()
@@ -4722,6 +4621,44 @@ class RandomImageViewer(QMainWindow):
             
             # Then apply full quality in background with progress
             QTimer.singleShot(10, self._apply_full_quality_lut)
+
+    def toggle_lut_enabled(self, checked):
+        """Toggle current LUT on/off without losing selection."""
+        # If turning off, remember current selection (if any) and switch combo to None
+        if not checked:
+            if getattr(self, 'current_lut_name', 'None') != 'None':
+                self._saved_lut_selection = self.current_lut_name
+            if hasattr(self, 'lut_combo'):
+                self.lut_combo.blockSignals(True)
+                self.lut_combo.setCurrentText("None")
+                self.lut_combo.blockSignals(False)
+            self.apply_selected_lut("None")
+            # Force immediate redraw WITHOUT LUT (previous enhanced cache may contain LUT-applied pixmaps)
+            try:
+                if hasattr(self, 'enhancement_cache'): self.enhancement_cache.clear()
+                if hasattr(self, 'scaled_cache'): self.scaled_cache.clear()
+                if hasattr(self, '_lut_process_cache'): self._lut_process_cache.clear()
+                # Do NOT clear base pixmap_cache so we avoid re-reading image from disk
+                if self.current_image:
+                    self.display_image(self.current_image)
+            except Exception as e:
+                print(f"toggle_lut_enabled redraw failure: {e}")
+            return
+        # Turning on: restore previously saved selection if available
+        target = getattr(self, '_saved_lut_selection', None)
+        if target and hasattr(self, 'lut_combo'):
+            if self.lut_combo.findText(target) >= 0:
+                self.lut_combo.blockSignals(True)
+                self.lut_combo.setCurrentText(target)
+                self.lut_combo.blockSignals(False)
+                self.apply_selected_lut(target)
+                return
+        # If no saved selection, do nothing (button will remain on but no LUT)
+        if hasattr(self, 'lut_toggle_btn') and self.current_lut_name == 'None':
+            # No LUT to enable; uncheck to reflect reality
+            self.lut_toggle_btn.blockSignals(True)
+            self.lut_toggle_btn.setChecked(False)
+            self.lut_toggle_btn.blockSignals(False)
 
     def _create_fast_lut_preview(self):
         """Create an instant high-quality preview optimized for display size"""
@@ -5715,28 +5652,31 @@ class RandomImageViewer(QMainWindow):
                     return
             
             # Last resort: use original image without LUT processing during zoom
-            # This prevents freezing when no cache is available
+            # This prevents freezing when no cache is available, but respect current LUT strength
+            base_pixmap = None
             if self.current_image in self.pixmap_cache:
-                original_pixmap = self.pixmap_cache[self.current_image]
+                base_pixmap = self.pixmap_cache[self.current_image]
             else:
-                # Load image as fallback
-                original_pixmap, error = safe_load_pixmap(self.current_image)
-                if error or original_pixmap.isNull():
-                    return  # Can't load image
-            
-            # Apply transforms if needed
+                base_pixmap, error = safe_load_pixmap(self.current_image)
+                if error or (not base_pixmap) or base_pixmap.isNull():
+                    return
+            # Apply fast enhancements first (grayscale/contrast/gamma)
+            preview_pixmap = self.apply_fast_enhancements(base_pixmap.copy()) if (self.grayscale_value!=0 or self.contrast_value!=50 or self.gamma_value!=0) else base_pixmap
+            # Apply lightweight LUT preview at current strength (no caching write to avoid thrash)
+            if self.current_lut and self.lut_strength>0:
+                try:
+                    preview_pixmap = self.apply_lut_to_image(preview_pixmap, self.current_lut, self.lut_strength)
+                except Exception as _e:
+                    pass
+            # Apply transforms
             if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
-                original_pixmap = self._apply_cached_transforms(original_pixmap)
-            
-            # Scale and display original
-            final_pixmap = self._scale_pixmap(original_pixmap, self.current_image)
+                preview_pixmap = self._apply_cached_transforms(preview_pixmap)
+            final_pixmap = self._scale_pixmap(preview_pixmap, self.current_image)
             self.image_label.setPixmap(final_pixmap)
-            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
-                and hasattr(self, '_fast_line_update')):
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines) and hasattr(self, '_fast_line_update')):
                 self._fast_line_update()
-            
             zoom = getattr(self.image_label, 'zoom_factor', 1.0)
-            self.status.showMessage(f"Zoom: {zoom:.1f}x (no LUT during zoom)")
+            self.status.showMessage(f"Zoom: {zoom:.1f}x (live LUT preview)")
             
         except Exception as e:
             print(f"Error in smart zoom display: {e}")
