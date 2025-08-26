@@ -2163,6 +2163,9 @@ class RandomImageViewer(QMainWindow):
         add_spacer(4)
         self.circle_timer = CircularCountdown(self.timer_spin.value()); self.circle_timer.set_parent_viewer(self); toolbar.addWidget(self.circle_timer)
         add_spacer(4)
+        # Save current view button
+        save_btn = QToolButton(); save_btn.setText("💾"); save_btn.setToolTip("Save current view (includes LUT, enhancements and lines)"); save_btn.setFixedSize(24,24); save_btn.clicked.connect(self.save_current_view); toolbar.addWidget(save_btn)
+        add_spacer(6)
 
     def _setup_enhancement_controls(self):
         """Setup the enhancement controls - put them on main toolbar initially"""
@@ -4259,11 +4262,50 @@ class RandomImageViewer(QMainWindow):
         if self.current_image:
             # Force full display_image to ensure visibility changes are applied
             self.display_image(self.current_image)
-        
-        # Update status message
-        status_msg = "Lines shown" if checked else "Lines hidden"
-        if self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines:
-            self.status.showMessage(status_msg)
+    
+    def save_current_view(self):
+        """Save the currently displayed view to a file, including LUT/enhancements and visible lines."""
+        # Create the final pixmap representing current view
+        try:
+            # If there is a currently displayed pixmap, use it (includes LUT/enhancements and possibly lines)
+            if self.image_label and self.image_label.pixmap() and not self.image_label.pixmap().isNull():
+                final_pixmap = self.image_label.pixmap().copy()
+            else:
+                # Fallback: render current image as display_image would
+                if not self.current_image:
+                    self.status.showMessage("No image loaded to save")
+                    return
+                # Force a full render into pixmap
+                self.display_image(self.current_image)
+                if not self.image_label.pixmap() or self.image_label.pixmap().isNull():
+                    self.status.showMessage("Failed to render image for saving")
+                    return
+                final_pixmap = self.image_label.pixmap().copy()
+
+            # Ask user for save location
+            options = QFileDialog.Options()
+            file_path, _ = QFileDialog.getSaveFileName(self, "Save Current View", os.path.expanduser("~"), "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)", options=options)
+            if not file_path:
+                return
+
+            # Determine format from extension
+            _, ext = os.path.splitext(file_path)
+            ext = ext.lower()
+            if ext in ('.jpg', '.jpeg'):
+                fmt = 'JPEG'
+            else:
+                fmt = 'PNG'
+
+            # Save using QPixmap save - this preserves pixel data including lines
+            saved = final_pixmap.save(file_path, fmt)
+            if saved:
+                self.status.showMessage(f"Saved view to {os.path.basename(file_path)}")
+            else:
+                self.status.showMessage("Failed to save image")
+
+        except Exception as e:
+            print(f"Error saving current view: {e}")
+            self.status.showMessage("Error saving current view")
 
     def toggle_always_on_top(self, checked):
         self.always_on_top = checked
@@ -6123,8 +6165,9 @@ class RandomImageViewer(QMainWindow):
             self._reset_timer()
 
 if __name__ == "__main__":
-    setup_image_allocation_limit()  # Increase image allocation limit at startup
+    # Defer Qt allocations until after QApplication is created
     app = QApplication(sys.argv)
+    setup_image_allocation_limit()  # Increase image allocation limit at startup
     app.setStyleSheet(get_adaptive_stylesheet())  # Use OS-adaptive theme
     viewer = RandomImageViewer()
     
