@@ -628,12 +628,18 @@ class ImageLabel(QLabel):
             
             # Check if click is within the zoomed image bounds
             if (0 <= rel_x <= zoomed_width and 0 <= rel_y <= zoomed_height):
-                # Convert to display coordinate space using same scale factors as display
-                # Use original image (pre-transform) size for consistent coordinate mapping
-                scale_x = zoomed_width / original_size.width()
-                scale_y = zoomed_height / original_size.height()
+                # Convert to display coordinate space using correct scale factors for rotation
+                # For 90° and 270° rotations, we need to account for swapped dimensions
+                if rotation == 90 or rotation == 270:
+                    # When rotated 90°/270°, the displayed width/height correspond to original height/width
+                    scale_x = zoomed_width / original_size.height()
+                    scale_y = zoomed_height / original_size.width()
+                else:
+                    # Normal case (0° and 180°)
+                    scale_x = zoomed_width / original_size.width()
+                    scale_y = zoomed_height / original_size.height()
                 
-                # Convert to display coordinates (relative to the rotated image)
+                # Convert to display coordinates (relative to the rotated image display space)
                 display_x = rel_x / scale_x
                 display_y = rel_y / scale_y
                 
@@ -1585,20 +1591,27 @@ class RandomImageViewer(QMainWindow):
     # ...existing code...
     def _compute_line_transform(self):
         """Compute scaling and offset for mapping original image coords to current displayed pixmap.
-        Returns dict with scale_x, scale_y, draw_x, draw_y. Only valid when rotation/flips are zero."""
+        Returns dict with scale_x, scale_y, draw_x, draw_y. Now supports rotation and flips."""
         try:
             if not hasattr(self, 'original_pixmap') or not self.original_pixmap:
                 return None
             if not self.image_label or not self.image_label.pixmap():
                 return None
-            # Only handle no-rotation / no-flip fast path
-            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
-                return None
+            
             original_size = self.original_pixmap.size()
             label_size = self.image_label.size()
             zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
-            # Base scaled size at 100% (aspect fit)
-            base_scaled = self.original_pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            
+            # For rotated images (90° and 270°), the display dimensions are swapped
+            if self.rotation_angle == 90 or self.rotation_angle == 270:
+                # Use swapped dimensions as reference for scaling
+                display_reference_size = QSize(original_size.height(), original_size.width())
+            else:
+                # 0° and 180° keep the same dimensions
+                display_reference_size = original_size
+            
+            # Base scaled size at 100% (aspect fit) using the correct reference dimensions
+            base_scaled = display_reference_size.scaled(label_size, Qt.KeepAspectRatio)
             zoomed_width = int(base_scaled.width() * zoom_factor)
             zoomed_height = int(base_scaled.height() * zoom_factor)
             draw_x = (label_size.width() - zoomed_width) // 2 + int(getattr(self.image_label, 'pan_offset_x', 0))
@@ -1633,12 +1646,12 @@ class RandomImageViewer(QMainWindow):
                 # Fallback: full redraw
                 self.display_image(self.current_image)
                 return
-            # If rotation or flips active, use full display_image for correctness
-            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
-                self.display_image(self.current_image)
-                return
+            # If rotation or flips are active we must avoid the GPU fast-path (it expects non-transformed pixmaps).
+            # Allow the CPU fallback below to handle transformed images, so DO NOT call display_image()
+            transforms_active = (self.rotation_angle != 0 or self.flipped_h or self.flipped_v)
             # Use GPU accelerated overlay when possible & image large enough
-            if (hasattr(self, 'gpu_processor') and self.gpu_processor and 
+            # Only use GPU accelerated overlay when no transforms are active
+            if (not transforms_active and hasattr(self, 'gpu_processor') and self.gpu_processor and 
                 self.gpu_processor.is_available() and 
                 current_pixmap.width() * current_pixmap.height() > 100000):
                 # Convert to image in BGRA/rgba format
@@ -1681,8 +1694,10 @@ class RandomImageViewer(QMainWindow):
                     if self.drawn_free_lines:
                         overlay = gpu_result.copy()
                         painter = QPainter(overlay)
-                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        # Keep non-free lines non-antialiased for crispness and speed,
+                        # but enable antialiasing for free-form lines for better visual quality.
                         painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        painter.setRenderHint(QPainter.Antialiasing, True)
                         for line in self.drawn_free_lines:
                             (sx, sy) = line['start']; (ex, ey) = line['end']
                             painter.drawLine(int(sx * scale_x) + offset_x, int(sy * scale_y) + offset_y,
@@ -1695,6 +1710,7 @@ class RandomImageViewer(QMainWindow):
             # CPU fallback: manually paint over current_pixmap copy
             overlay = current_pixmap.copy()
             painter = QPainter(overlay)
+            # Default to no antialiasing (vertical/horizontal lines remain crisp).
             painter.setRenderHint(QPainter.Antialiasing, False)
             painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
             tx = self._compute_line_transform()
@@ -1705,20 +1721,128 @@ class RandomImageViewer(QMainWindow):
                     offset_x = 0; offset_y = 0
                 else:
                     offset_x = draw_x; offset_y = draw_y
-                for x in self.drawn_lines:
-                    dx = int(x * scale_x) + offset_x
-                    if 0 <= dx < overlay.width():
-                        painter.drawLine(dx, 0, dx, overlay.height())
-                for y in self.drawn_horizontal_lines:
-                    dy = int(y * scale_y) + offset_y
-                    if 0 <= dy < overlay.height():
-                        painter.drawLine(0, dy, overlay.width(), dy)
-                for line in self.drawn_free_lines:
-                    (sx, sy) = line['start']; (ex, ey) = line['end']
-                    painter.drawLine(int(sx * scale_x) + offset_x, int(sy * scale_y) + offset_y,
-                                     int(ex * scale_x) + offset_x, int(ey * scale_y) + offset_y)
+                
+                # Get original size for transformation calculations
+                original_size = self.original_pixmap.size() if hasattr(self, 'original_pixmap') and self.original_pixmap else QSize(1, 1)
+                
+                # Apply coordinate transformations based on rotation and flips
+                if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                    # Handle vertical lines with transformations
+                    for x in self.drawn_lines:
+                        # Apply flip transformations first
+                        transformed_x = x
+                        if self.flipped_h:
+                            transformed_x = original_size.width() - x
+                        
+                        # Then apply rotation transformation
+                        if self.rotation_angle == 90:
+                            # Vertical line becomes horizontal
+                            dy = int(transformed_x * scale_y) + offset_y
+                            if 0 <= dy < overlay.height():
+                                painter.drawLine(0, dy, overlay.width(), dy)
+                        elif self.rotation_angle == 180:
+                            # Vertical line stays vertical but position changes
+                            final_x = original_size.width() - transformed_x
+                            dx = int(final_x * scale_x) + offset_x
+                            if 0 <= dx < overlay.width():
+                                painter.drawLine(dx, 0, dx, overlay.height())
+                        elif self.rotation_angle == 270:
+                            # Vertical line becomes horizontal
+                            final_y = original_size.height() - transformed_x
+                            dy = int(final_y * scale_y) + offset_y
+                            if 0 <= dy < overlay.height():
+                                painter.drawLine(0, dy, overlay.width(), dy)
+                        else:
+                            # No rotation, just flips applied
+                            dx = int(transformed_x * scale_x) + offset_x
+                            if 0 <= dx < overlay.width():
+                                painter.drawLine(dx, 0, dx, overlay.height())
+                    
+                    # Handle horizontal lines with transformations
+                    for y in self.drawn_horizontal_lines:
+                        # Apply flip transformations first
+                        transformed_y = y
+                        if self.flipped_v:
+                            transformed_y = original_size.height() - y
+                        
+                        # Then apply rotation transformation
+                        if self.rotation_angle == 90:
+                            # Horizontal line becomes vertical
+                            final_x = original_size.width() - transformed_y
+                            dx = int(final_x * scale_x) + offset_x
+                            if 0 <= dx < overlay.width():
+                                painter.drawLine(dx, 0, dx, overlay.height())
+                        elif self.rotation_angle == 180:
+                            # Horizontal line stays horizontal but position changes
+                            final_y = original_size.height() - transformed_y
+                            dy = int(final_y * scale_y) + offset_y
+                            if 0 <= dy < overlay.height():
+                                painter.drawLine(0, dy, overlay.width(), dy)
+                        elif self.rotation_angle == 270:
+                            # Horizontal line becomes vertical
+                            dx = int(transformed_y * scale_x) + offset_x
+                            if 0 <= dx < overlay.width():
+                                painter.drawLine(dx, 0, dx, overlay.height())
+                        else:
+                            # No rotation, just flips applied
+                            dy = int(transformed_y * scale_y) + offset_y
+                            if 0 <= dy < overlay.height():
+                                painter.drawLine(0, dy, overlay.width(), dy)
+                    
+                    # Handle free lines with transformations
+                    for line in self.drawn_free_lines:
+                        start_x, start_y = line['start']
+                        end_x, end_y = line['end']
+                        
+                        # Apply flip transformations first
+                        flip_start_x = start_x if not self.flipped_h else original_size.width() - start_x
+                        flip_start_y = start_y if not self.flipped_v else original_size.height() - start_y
+                        flip_end_x = end_x if not self.flipped_h else original_size.width() - end_x
+                        flip_end_y = end_y if not self.flipped_v else original_size.height() - end_y
+                        
+                        # Then apply rotation transformation
+                        if self.rotation_angle == 90:
+                            display_start_x = int((original_size.width() - flip_start_y) * scale_x) + offset_x
+                            display_start_y = int(flip_start_x * scale_y) + offset_y
+                            display_end_x = int((original_size.width() - flip_end_y) * scale_x) + offset_x
+                            display_end_y = int(flip_end_x * scale_y) + offset_y
+                        elif self.rotation_angle == 180:
+                            display_start_x = int((original_size.width() - flip_start_x) * scale_x) + offset_x
+                            display_start_y = int((original_size.height() - flip_start_y) * scale_y) + offset_y
+                            display_end_x = int((original_size.width() - flip_end_x) * scale_x) + offset_x
+                            display_end_y = int((original_size.height() - flip_end_y) * scale_y) + offset_y
+                        elif self.rotation_angle == 270:
+                            display_start_x = int(flip_start_y * scale_x) + offset_x
+                            display_start_y = int((original_size.height() - flip_start_x) * scale_y) + offset_y
+                            display_end_x = int(flip_end_y * scale_x) + offset_x
+                            display_end_y = int((original_size.height() - flip_end_x) * scale_y) + offset_y
+                        else:
+                            # No rotation, just flips applied
+                            display_start_x = int(flip_start_x * scale_x) + offset_x
+                            display_start_y = int(flip_start_y * scale_y) + offset_y
+                            display_end_x = int(flip_end_x * scale_x) + offset_x
+                            display_end_y = int(flip_end_y * scale_y) + offset_y
+                        
+                        # Enable antialiasing for free-form lines for smoother appearance
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                else:
+                    # No transformations needed - simple case
+                    for x in self.drawn_lines:
+                        dx = int(x * scale_x) + offset_x
+                        if 0 <= dx < overlay.width():
+                            painter.drawLine(dx, 0, dx, overlay.height())
+                    for y in self.drawn_horizontal_lines:
+                        dy = int(y * scale_y) + offset_y
+                        if 0 <= dy < overlay.height():
+                            painter.drawLine(0, dy, overlay.width(), dy)
+                    for line in self.drawn_free_lines:
+                        (sx, sy) = line['start']; (ex, ey) = line['end']
+                        painter.drawLine(int(sx * scale_x) + offset_x, int(sy * scale_y) + offset_y,
+                                         int(ex * scale_x) + offset_x, int(ey * scale_y) + offset_y)
             else:
-                # Fallback simple proportional scaling
+                # Fallback simple proportional scaling when transform computation fails
                 if hasattr(self, 'original_pixmap') and self.original_pixmap:
                     orig_w = self.original_pixmap.width(); orig_h = self.original_pixmap.height()
                     disp_w = current_pixmap.width(); disp_h = current_pixmap.height()
@@ -1726,6 +1850,7 @@ class RandomImageViewer(QMainWindow):
                     scale_y = disp_h / orig_h if orig_h else 1.0
                 else:
                     scale_x = scale_y = 1.0
+                # Simple drawing without coordinate transformations (fallback)
                 for x in self.drawn_lines:
                     dx = int(x * scale_x)
                     if 0 <= dx < overlay.width():
@@ -1740,11 +1865,9 @@ class RandomImageViewer(QMainWindow):
             painter.end()
             self.image_label.setPixmap(overlay)
         except Exception as e:
-            print(f"_fast_line_update failed: {e}; falling back to full display_image")
-            try:
-                self.display_image(self.current_image)
-            except Exception as e2:
-                print(f"Fallback display_image also failed: {e2}")
+            print(f"_fast_line_update failed: {e}; skipping line overlay to prevent loops")
+            # DO NOT call display_image here as it can cause infinite loops with rotation + LUT
+            # Instead, just skip the line overlay and let the current image display without lines
     # ...existing code...
     def __init__(self):
         super().__init__()
@@ -1804,6 +1927,10 @@ class RandomImageViewer(QMainWindow):
         self.lut_files = []       # List of available LUT files
         self.lut_strength = 100   # LUT application strength (0-100%)
         self.lut_cache = {}       # Cache for loaded LUTs to avoid reloading
+        # Separate enable flag so a selected LUT can be temporarily disabled without clearing selection
+        self.lut_enabled = False
+        # Track whether cached last processed image contained LUT so we don't reuse it when disabled
+        self._last_processed_has_lut = False
         
         # GPU acceleration
         self.gpu_processor = GPULutProcessor()
@@ -2526,7 +2653,7 @@ class RandomImageViewer(QMainWindow):
                 self._manage_cache(self.pixmap_cache, img_path, base_pixmap)
             
             # SMART LUT PROCESSING: Use full quality when lines are present
-            if self.current_lut and self.lut_strength > 0:
+            if self.lut_enabled and self.current_lut and self.lut_strength > 0:
                 # Check if we have cached LUT result (with lines)
                 lut_cache_key = self._get_lut_cache_key()
                 if (hasattr(self, '_lut_process_cache') and 
@@ -2750,7 +2877,9 @@ class RandomImageViewer(QMainWindow):
                     
                     if (max_x >= -tolerance and min_x <= final_pixmap.width() + tolerance and
                         max_y >= -tolerance and min_y <= final_pixmap.height() + tolerance):
+                        painter.setRenderHint(QPainter.Antialiasing, True)
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
             else:
                 # No rotation - original line drawing logic
                 # Draw vertical lines
@@ -3030,6 +3159,7 @@ class RandomImageViewer(QMainWindow):
                     
                     # ZOOM OPTIMIZATION: Cache the final processed image for fast zoom
                     self._last_processed_image = gpu_result.copy()
+                    self._last_processed_has_lut = True if (self.lut_enabled and self.current_lut and self.lut_strength>0) else False
                     
                     return result_pixmap
                 else:
@@ -3064,6 +3194,7 @@ class RandomImageViewer(QMainWindow):
             
             # ZOOM OPTIMIZATION: Cache the final processed image for fast zoom  
             self._last_processed_image = image.copy()
+            self._last_processed_has_lut = True if (self.lut_enabled and self.current_lut and self.lut_strength>0) else False
             
             return result_pixmap
             
@@ -3079,6 +3210,7 @@ class RandomImageViewer(QMainWindow):
         # Clear zoom optimization cache
         if hasattr(self, '_last_processed_image'):
             self._last_processed_image = None
+        self._last_processed_has_lut = False
         
         # Also clear enhancement and scaled caches to ensure fresh processing
         self.enhancement_cache.clear()
@@ -4542,6 +4674,7 @@ class RandomImageViewer(QMainWindow):
         if lut_name == "None" or not lut_name:
             self.current_lut = None
             self.current_lut_name = "None"
+            self.lut_enabled = False  # Disable LUT when "None" is selected
             self.status.showMessage("LUT disabled")
             # Sync toggle button state
             if hasattr(self, 'lut_toggle_btn'):
@@ -4590,6 +4723,7 @@ class RandomImageViewer(QMainWindow):
                     else:
                         self.status.showMessage(f"Failed to load LUT: {lut_name}")
                         self.current_lut_name = "None"
+                        self.lut_enabled = False  # Disable when LUT fails to load
                         # Reset combo box to "None" if loading failed
                         if hasattr(self, 'lut_combo'):
                             self.lut_combo.blockSignals(True)
@@ -4599,11 +4733,14 @@ class RandomImageViewer(QMainWindow):
                 self.status.showMessage(f"LUT file not found: {lut_name}")
                 self.current_lut = None
                 self.current_lut_name = "None"
+                self.lut_enabled = False  # Disable when LUT file not found
             # Sync toggle button state when a LUT successfully loaded
             if self.current_lut_name != "None" and hasattr(self, 'lut_toggle_btn'):
                 self.lut_toggle_btn.blockSignals(True)
                 self.lut_toggle_btn.setChecked(True)
                 self.lut_toggle_btn.blockSignals(False)
+                # IMPORTANT: Also set the internal enabled flag when LUT is loaded
+                self.lut_enabled = True
         
         # Clear caches and update display with progressive preview
         self.enhancement_cache.clear()
@@ -4626,6 +4763,7 @@ class RandomImageViewer(QMainWindow):
         """Toggle current LUT on/off without losing selection."""
         # If turning off, remember current selection (if any) and switch combo to None
         if not checked:
+            self.lut_enabled = False
             if getattr(self, 'current_lut_name', 'None') != 'None':
                 self._saved_lut_selection = self.current_lut_name
             if hasattr(self, 'lut_combo'):
@@ -4638,6 +4776,8 @@ class RandomImageViewer(QMainWindow):
                 if hasattr(self, 'enhancement_cache'): self.enhancement_cache.clear()
                 if hasattr(self, 'scaled_cache'): self.scaled_cache.clear()
                 if hasattr(self, '_lut_process_cache'): self._lut_process_cache.clear()
+                if hasattr(self, '_last_processed_image'): self._last_processed_image = None
+                self._last_processed_has_lut = False
                 # Do NOT clear base pixmap_cache so we avoid re-reading image from disk
                 if self.current_image:
                     self.display_image(self.current_image)
@@ -4645,6 +4785,7 @@ class RandomImageViewer(QMainWindow):
                 print(f"toggle_lut_enabled redraw failure: {e}")
             return
         # Turning on: restore previously saved selection if available
+        self.lut_enabled = True
         target = getattr(self, '_saved_lut_selection', None)
         if target and hasattr(self, 'lut_combo'):
             if self.lut_combo.findText(target) >= 0:
@@ -5507,7 +5648,7 @@ class RandomImageViewer(QMainWindow):
             self._lut_process_cache.clear()  # Clear LUT cache when strength changes
         
         # Show immediate update without heavy processing
-        if self.current_image and self.current_lut:
+        if self.lut_enabled and self.current_image and self.current_lut:
             if value > 0:
                 # Show fast preview first
                 self.status.showMessage(f"LUT strength: {value}% (instant preview)")
@@ -5536,7 +5677,7 @@ class RandomImageViewer(QMainWindow):
                 self._smart_zoom_display()
             
             # Update status with processing awareness
-            if (hasattr(self, '_async_processing_state') and 
+            if (self.lut_enabled and hasattr(self, '_async_processing_state') and 
                 self._async_processing_state and self.current_lut):
                 progress = (self._async_processing_state['current_row'] / 
                           self._async_processing_state['total_rows']) * 100
@@ -5559,7 +5700,7 @@ class RandomImageViewer(QMainWindow):
                     self._fast_line_update()
             
             # Update status with processing awareness
-            if (hasattr(self, '_async_processing_state') and 
+            if (self.lut_enabled and hasattr(self, '_async_processing_state') and 
                 self._async_processing_state and self.current_lut):
                 progress = (self._async_processing_state['current_row'] / 
                           self._async_processing_state['total_rows']) * 100
@@ -5581,7 +5722,7 @@ class RandomImageViewer(QMainWindow):
                     self._fast_line_update()
             
             # Update status with processing awareness
-            if (hasattr(self, '_async_processing_state') and 
+            if (self.lut_enabled and hasattr(self, '_async_processing_state') and 
                 self._async_processing_state and self.current_lut):
                 progress = (self._async_processing_state['current_row'] / 
                           self._async_processing_state['total_rows']) * 100
@@ -5602,7 +5743,8 @@ class RandomImageViewer(QMainWindow):
             # If we have a recently processed image cached, use it for zoom
             if (hasattr(self, '_last_processed_image') and 
                 self._last_processed_image and
-                not self._last_processed_image.isNull()):
+                not self._last_processed_image.isNull() and
+                (self.lut_enabled or not self._last_processed_has_lut)):
                 
                 # Use the cached processed image for zoom operations
                 processed_pixmap = QPixmap.fromImage(self._last_processed_image)
@@ -5625,7 +5767,7 @@ class RandomImageViewer(QMainWindow):
                 return
             
             # If no cached processed image, check LUT cache
-            if self.current_lut and self.lut_strength > 0:
+            if self.lut_enabled and self.current_lut and self.lut_strength > 0:
                 cache_key = self._get_lut_cache_key()
                 
                 # Check if we have cached LUT result
@@ -5663,7 +5805,7 @@ class RandomImageViewer(QMainWindow):
             # Apply fast enhancements first (grayscale/contrast/gamma)
             preview_pixmap = self.apply_fast_enhancements(base_pixmap.copy()) if (self.grayscale_value!=0 or self.contrast_value!=50 or self.gamma_value!=0) else base_pixmap
             # Apply lightweight LUT preview at current strength (no caching write to avoid thrash)
-            if self.current_lut and self.lut_strength>0:
+            if self.lut_enabled and self.current_lut and self.lut_strength>0:
                 try:
                     preview_pixmap = self.apply_lut_to_image(preview_pixmap, self.current_lut, self.lut_strength)
                 except Exception as _e:
@@ -5676,7 +5818,12 @@ class RandomImageViewer(QMainWindow):
             if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines) and hasattr(self, '_fast_line_update')):
                 self._fast_line_update()
             zoom = getattr(self.image_label, 'zoom_factor', 1.0)
-            self.status.showMessage(f"Zoom: {zoom:.1f}x (live LUT preview)")
+            # Show more specific status based on whether LUT was applied
+            if self.lut_enabled and self.current_lut and self.lut_strength > 0:
+                lut_name = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+                self.status.showMessage(f"Zoom: {zoom:.1f}x (live {lut_name} preview)")
+            else:
+                self.status.showMessage(f"Zoom: {zoom:.1f}x (no LUT)")
             
         except Exception as e:
             print(f"Error in smart zoom display: {e}")
@@ -5696,7 +5843,7 @@ class RandomImageViewer(QMainWindow):
     
     def _get_lut_cache_key(self):
         """Generate cache key for LUT processing - includes lines and enhancements"""
-        if not self.current_lut or not self.current_image:
+        if not self.lut_enabled or not self.current_lut or not self.current_image:
             return None
             
         # Create comprehensive cache key including all visual modifications
@@ -5751,6 +5898,11 @@ class RandomImageViewer(QMainWindow):
             self.scaled_cache.clear()
             self.display_image(self.current_image)
             self.status.showMessage(f"Horizontal flip: {'ON' if self.flipped_h else 'OFF'}")
+            # Disable/enable line tools when flip/rotation state changes
+            try:
+                self._sync_line_tools_state()
+            except Exception:
+                pass
 
     def flip_vertical(self):
         """Flip the current image vertically"""
@@ -5764,6 +5916,11 @@ class RandomImageViewer(QMainWindow):
             self.scaled_cache.clear()
             self.display_image(self.current_image)
             self.status.showMessage(f"Vertical flip: {'ON' if self.flipped_v else 'OFF'}")
+            # Disable/enable line tools when flip/rotation state changes
+            try:
+                self._sync_line_tools_state()
+            except Exception:
+                pass
 
     def rotate_image_90(self):
         """Rotate the current image by 90 degrees"""
@@ -5775,6 +5932,53 @@ class RandomImageViewer(QMainWindow):
             # Redisplay the image with new rotation
             self.display_image(self.current_image)
             self.status.showMessage(f"Rotated to {self.rotation_angle}°")
+            # Disable/enable line tools when flip/rotation state changes
+            try:
+                self._sync_line_tools_state()
+            except Exception:
+                pass
+
+    def _sync_line_tools_state(self):
+        """Enable or disable line tool buttons depending on rotation/flip state.
+        When image is rotated or flipped we disable line drawing tools because
+        coordinate math for drawing over rotated/flipped images is disabled.
+        """
+        # If any transform is active, disable line tools
+        transforms_active = (getattr(self, 'rotation_angle', 0) != 0) or getattr(self, 'flipped_h', False) or getattr(self, 'flipped_v', False)
+
+        # Buttons may not exist yet during startup; guard with hasattr
+        for btn_name in ('line_tool_btn', 'hline_tool_btn', 'free_line_tool_btn'):
+            if hasattr(self, btn_name):
+                btn = getattr(self, btn_name)
+                try:
+                    btn.setEnabled(not transforms_active)
+                    # When disabling, also uncheck and cancel drawing modes
+                    if transforms_active:
+                        if hasattr(btn, 'setChecked'):
+                            try:
+                                btn.setChecked(False)
+                            except Exception:
+                                pass
+                except Exception:
+                    # ignore failures to set UI state
+                    pass
+
+        # Clear any active drawing modes when transforms are active
+        if transforms_active:
+            self.line_drawing_mode = False
+            self.horizontal_line_drawing_mode = False
+            self.free_line_drawing_mode = False
+            # Ensure the toolbar buttons reflect that
+            if hasattr(self, 'line_tool_btn'):
+                try: self.line_tool_btn.setChecked(False)
+                except Exception: pass
+            if hasattr(self, 'hline_tool_btn'):
+                try: self.hline_tool_btn.setChecked(False)
+                except Exception: pass
+            if hasattr(self, 'free_line_tool_btn'):
+                try: self.free_line_tool_btn.setChecked(False)
+                except Exception: pass
+
 
     def copy_to_clipboard(self):
         """Copy the current displayed image (with all enhancements and lines) to clipboard"""
