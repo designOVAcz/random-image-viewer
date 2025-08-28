@@ -4648,6 +4648,13 @@ class RandomImageViewer(QMainWindow):
         # Clear all caches when resetting
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
+        
+        # CRITICAL: Clear zoom optimization cache when resetting enhancements
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+        if hasattr(self, '_last_processed_image'):
+            self._last_processed_image = None
+        self._last_processed_has_lut = False
         self._update_enhancement_menu_states()
         if self.current_image:
             self.display_image(self.current_image)
@@ -4789,6 +4796,12 @@ class RandomImageViewer(QMainWindow):
         self.scaled_cache.clear()
         if hasattr(self, '_lut_process_cache'):
             self._lut_process_cache.clear()  # Clear LUT cache when LUT changes
+        
+        # CRITICAL: Clear zoom optimization cache when LUT changes to prevent wrong LUT being applied during pan/zoom
+        if hasattr(self, '_last_processed_image'):
+            self._last_processed_image = None
+        self._last_processed_has_lut = False
+        
         if self.current_image:
             # Show immediate preview with fast processing for responsiveness
             if self.current_lut:
@@ -5688,6 +5701,11 @@ class RandomImageViewer(QMainWindow):
         self.scaled_cache.clear()
         if hasattr(self, '_lut_process_cache'):
             self._lut_process_cache.clear()  # Clear LUT cache when strength changes
+        
+        # CRITICAL: Clear zoom optimization cache when LUT strength changes
+        if hasattr(self, '_last_processed_image'):
+            self._last_processed_image = None
+        self._last_processed_has_lut = False
         
         # Show immediate update without heavy processing
         if self.lut_enabled and self.current_image and self.current_lut:
