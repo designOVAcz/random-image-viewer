@@ -748,8 +748,8 @@ class ImageLabel(QLabel):
         prev_action.triggered.connect(self.parent_viewer.show_previous_image)
         menu.addAction(prev_action)
         
-        next_action = QAction("Next Random Image", self)
-        next_action.triggered.connect(self.parent_viewer.show_random_image)
+        next_action = QAction("Next Image", self)
+        next_action.triggered.connect(self.parent_viewer._manual_next_image)
         menu.addAction(next_action)
         
         menu.addSeparator()
@@ -1948,6 +1948,9 @@ class RandomImageViewer(QMainWindow):
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
+        
+        # Sorting mode for navigation
+        self.random_mode = True  # Default to random mode
         self.timer.timeout.connect(self._on_timer_tick)
 
         self.init_ui()
@@ -2155,7 +2158,10 @@ class RandomImageViewer(QMainWindow):
         # Navigation & timer
         prev_btn = QToolButton(); prev_btn.setText("⬅"); prev_btn.setToolTip("Previous Image (Go Back in History)"); prev_btn.setFixedSize(24,24); prev_btn.clicked.connect(self.show_previous_image); toolbar.addWidget(prev_btn)
         add_spacer(4)
-        next_btn = QToolButton(); next_btn.setText("🎲"); next_btn.setToolTip("Show Next Random Image"); next_btn.setFixedSize(24,24); next_btn.clicked.connect(self._manual_next_image); toolbar.addWidget(next_btn)
+        next_btn = QToolButton(); next_btn.setText("🎲"); next_btn.setToolTip("Show Next Image"); next_btn.setFixedSize(24,24); next_btn.clicked.connect(self._manual_next_image); toolbar.addWidget(next_btn)
+        add_spacer(4)
+        # Sort order toggle
+        self.sort_order_button = QToolButton(); self.sort_order_button.setCheckable(True); self.sort_order_button.setChecked(True); self.sort_order_button.setText("🔀"); self.sort_order_button.setToolTip("Toggle Random/Alphabetical Order"); self.sort_order_button.setFixedSize(24,24); self.sort_order_button.toggled.connect(self.toggle_sort_order); toolbar.addWidget(self.sort_order_button)
         add_spacer(4)
         self.timer_button = QToolButton(); self.timer_button.setCheckable(True); self.timer_button.setText("⚡"); self.timer_button.setToolTip("Toggle Auto Advance"); self.timer_button.setFixedSize(24,24); self.timer_button.toggled.connect(self.toggle_timer); toolbar.addWidget(self.timer_button)
         add_spacer(4)
@@ -2628,7 +2634,31 @@ class RandomImageViewer(QMainWindow):
             traceback.print_exc()
 
     def _manual_next_image(self):
-        self.show_random_image()
+        if not self.images:
+            return
+
+        if self.random_mode:
+            self.show_random_image()
+        else:
+            # Sequential mode
+            if self.current_image and self.current_image in self.images:
+                try:
+                    current_list_index = self.images.index(self.current_image)
+                    next_index = (current_list_index + 1) % len(self.images)
+                except ValueError:
+                    next_index = 0
+            else:
+                next_index = 0
+            
+            img_path = self.images[next_index]
+            self._display_image_with_lut_preview(img_path)
+            self.add_to_history(img_path)
+            self.current_image = img_path
+            self.update_image_info(img_path)
+            self.set_status_path(img_path)
+            if self._auto_advance_active:
+                self.timer_remaining = self.timer_spin.value()
+                self._update_ring()
 
     def display_image(self, img_path):
         # Clear LUT processing cache when changing images to prevent memory buildup
@@ -4002,7 +4032,11 @@ class RandomImageViewer(QMainWindow):
         if not self._timer_paused:
             self.timer_remaining -= 1
             if self.timer_remaining <= 0:
-                self.show_random_image()
+                # Use mode-aware navigation for auto-advance
+                if self.random_mode:
+                    self.show_random_image()
+                else:
+                    self._manual_next_image()
             else:
                 self._update_ring()
         # If paused, just update the ring display
@@ -4024,6 +4058,16 @@ class RandomImageViewer(QMainWindow):
     def _update_ring(self):
         self.circle_timer.set_total_time(self.timer_spin.value())
         self.circle_timer.set_remaining_time(self.timer_remaining)
+
+    def toggle_sort_order(self, checked):
+        """Toggle between random and alphabetical image order."""
+        self.random_mode = checked
+        if self.random_mode:
+            self.sort_order_button.setToolTip("Order: Random")
+            self.status.showMessage("Image order set to Random")
+        else:
+            self.sort_order_button.setToolTip("Order: Alphabetical")
+            self.status.showMessage("Image order set to Alphabetical")
 
     def toggle_line_drawing(self, checked):
         self.line_drawing_mode = checked
@@ -6147,18 +6191,44 @@ class RandomImageViewer(QMainWindow):
                 self._update_ring()
 
     def show_next_image(self):
-        if self.history_index < len(self.history) - 1:
-            self.history_index += 1
-            img_path = self.history[self.history_index]
+        """Shows the next image, respecting the random or sequential mode."""
+        if not self.images:
+            return
+
+        if self.random_mode:
+            # In random mode, if at end of history show new random image
+            if self.history_index < len(self.history) - 1:
+                self.history_index += 1
+                img_path = self.history[self.history_index]
+                self._display_image_with_lut_preview(img_path)
+                self.current_image = img_path
+                self.update_image_info(img_path)
+                self.set_status_path(img_path)
+                if self._auto_advance_active:
+                    self.timer_remaining = self.timer_spin.value()
+                    self._update_ring()
+            else:
+                self.show_random_image()
+        else:
+            # Sequential mode - navigate alphabetically through images
+            if self.current_image and self.current_image in self.images:
+                try:
+                    current_list_index = self.images.index(self.current_image)
+                    next_index = (current_list_index + 1) % len(self.images)
+                except ValueError:
+                    next_index = 0
+            else:
+                next_index = 0
+            
+            img_path = self.images[next_index]
             self._display_image_with_lut_preview(img_path)
+            self.add_to_history(img_path)
             self.current_image = img_path
             self.update_image_info(img_path)
             self.set_status_path(img_path)
             if self._auto_advance_active:
                 self.timer_remaining = self.timer_spin.value()
                 self._update_ring()
-        else:
-            self.show_random_image()
 
     def choose_folder(self):
         # Set default folder if it exists
@@ -6177,7 +6247,20 @@ class RandomImageViewer(QMainWindow):
             self.update_image_info()
             self._update_title()
             if self.images:
-                self.show_random_image()
+                # Use mode-aware navigation when opening folder
+                if self.random_mode:
+                    self.show_random_image()
+                else:
+                    # In alphabetical mode, start with the first image
+                    first_image = self.images[0]
+                    self._display_image_with_lut_preview(first_image)
+                    self.add_to_history(first_image)
+                    self.current_image = first_image
+                    self.update_image_info(first_image)
+                    self.set_status_path(first_image)
+                    if self._auto_advance_active:
+                        self.timer_remaining = self.timer_spin.value()
+                        self._update_ring()
             else:
                 self.image_label.setText("No images found in selected folder or its subfolders.")
             self._reset_timer()
