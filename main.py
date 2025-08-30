@@ -805,6 +805,13 @@ class ImageLabel(QLabel):
             fullscreen_action.triggered.connect(lambda: self.parent_viewer.toggle_fullscreen(True))
             menu.addAction(fullscreen_action)
         
+        # Toolbar visibility toggle (especially useful in fullscreen)
+        toolbar_action = QAction("Show/Hide Toolbar", self)
+        toolbar_action.setCheckable(True)
+        toolbar_action.setChecked(self.parent_viewer.main_toolbar.isVisible())
+        toolbar_action.toggled.connect(self.parent_viewer.toggle_toolbar_visibility)
+        menu.addAction(toolbar_action)
+        
         menu.addSeparator()
         
         # --- Settings ---
@@ -4068,6 +4075,20 @@ class RandomImageViewer(QMainWindow):
         else:
             self.sort_order_button.setToolTip("Order: Alphabetical")
             self.status.showMessage("Image order set to Alphabetical")
+
+    def toggle_toolbar_visibility(self, checked):
+        """Toggle visibility of the main toolbar and slider toolbar."""
+        if checked:
+            # Show toolbars
+            self.main_toolbar.show()
+            if self.two_row_mode:
+                self.slider_toolbar.show()
+            self.status.showMessage("Toolbar shown")
+        else:
+            # Hide toolbars
+            self.main_toolbar.hide()
+            self.slider_toolbar.hide()
+            self.status.showMessage("Toolbar hidden - Right-click to show")
 
     def toggle_line_drawing(self, checked):
         self.line_drawing_mode = checked
