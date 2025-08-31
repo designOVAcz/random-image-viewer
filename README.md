@@ -5,6 +5,25 @@ A simple, modern, cross-platform desktop app to view random images from any fold
 - Edited and tested for Windows OS
 ---
 
+## Features
+
+- 📁 **Open Any Folder:** Load images from a folder and its subfolders.
+- 🎲 **Smart Navigation:** Random image viewing with alphabetical sorting toggle.
+- 🔀 **Sorting Toggle:** Switch between random and alphabetical order with one click.
+- ⏮️ ⏭️ **History Navigation:** Go back and forward through viewed images.
+- 🕒 **Auto-Advance Timer:** Automatically switch to a new random image at set intervals, with a circular countdown overlay.
+- 🔍 **Zoom:** Zoom in/out/reset with mouse wheel, keyboard, or context menu.
+- 🖥️ **Fullscreen Mode:** Toggle fullscreen with F11 key or toolbar button for immersive viewing.
+- 👁️ **Minimal Mode:** Hide all UI elements (toolbars, status bar, window decorations) for distraction-free viewing.
+- 🖱️ **Smart Context Menu:** Right-click for actions (auto-hides when zoomed to avoid pan interference).
+- 🎨 **OS-Adaptive Theme:** Automatically detects Windows dark/light mode preferences.
+- ⌨️ **Full Keyboard Support:** Complete shortcut system for all operations.
+- 🔄 **Image Transformations:** Flip horizontal/vertical with visual state indicators.
+- 📐 **Professional Line Drawing:** Three-mode annotation system with free line tool.
+- 🖥️ **Cross-platform:** Works on Windows, macOS, and Linux.
+
+---
+
 ### 🔀 **Smart Navigation System (NEW)**
 
 Perfect for both random discovery and systematic browsing of image collections.
@@ -102,25 +121,6 @@ Advanced window manipulation when UI is hidden:
 
 ---
 
-## Features
-
-- 📁 **Open Any Folder:** Load images from a folder and its subfolders.
-- 🎲 **Smart Navigation:** Random image viewing with alphabetical sorting toggle.
-- 🔀 **Sorting Toggle:** Switch between random and alphabetical order with one click.
-- ⏮️ ⏭️ **History Navigation:** Go back and forward through viewed images.
-- 🕒 **Auto-Advance Timer:** Automatically switch to a new random image at set intervals, with a circular countdown overlay.
-- 🔍 **Zoom:** Zoom in/out/reset with mouse wheel, keyboard, or context menu.
-- 🖥️ **Fullscreen Mode:** Toggle fullscreen with F11 key or toolbar button for immersive viewing.
-- 👁️ **Minimal Mode:** Hide all UI elements (toolbars, status bar, window decorations) for distraction-free viewing.
-- 🖱️ **Smart Context Menu:** Right-click for actions (auto-hides when zoomed to avoid pan interference).
-- 🎨 **OS-Adaptive Theme:** Automatically detects Windows dark/light mode preferences.
-- ⌨️ **Full Keyboard Support:** Complete shortcut system for all operations.
-- 🔄 **Image Transformations:** Flip horizontal/vertical with visual state indicators.
-- 📐 **Professional Line Drawing:** Three-mode annotation system with free line tool.
-- 🖥️ **Cross-platform:** Works on Windows, macOS, and Linux.
-
----
-
 ## 🆕 **Latest Enhancements**
 
 ### CUBE LUT Support
@@ -173,50 +173,6 @@ Full LUT pipeline now runs on the GPU (OpenCL) for large images with seamless CP
 * Indexing formula: `index = r + g*size + b*size*size` using integer truncation to mirror CPU path.
 * Strength blending: `final = original*(1-strength) + lut*strength` executed per channel.
 * Kernel caching avoids repeated build & retrieval overhead.
-
-#### 📦 Dependencies
-Install PyOpenCL (plus vendor GPU driver / runtime):
-```sh
-uv pip install pyopencl
-# or
-pip install pyopencl
-```
-If PyOpenCL is missing, the app silently reverts to CPU LUT processing.
-
-#### ⚙️ When GPU Is Used
-| Scenario | Action |
-|----------|-------|
-| Large image (> threshold) | GPU full processing |
-| Lines present | Lower threshold to favor GPU |
-| Small images | CPU may be chosen (overhead not worth it) |
-
-Thresholds auto-tune based on whether lines are visible.
-
-#### 🛠️ Troubleshooting
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Wild / wrong (psychedelic) colors | Old kernel using `float3*` (alignment/padding) | Update to version using flat float LUT buffer |
-| All black output | GPU kernel compiling but LUT strength 0 or invalid LUT size | Check LUT strength slider & ensure .cube loaded |
-| Blue tint after drawing lines | Format mismatch (RGBA vs RGB32) | Ensure image converted to `Format_RGB32` before GPU line kernel |
-| GPU not used | No OpenCL platform or image below threshold | Install drivers / PyOpenCL or enlarge image |
-
-Enable verbose console to confirm messages like:
-```
-Using GPU for async LUT processing (WIDTHxHEIGHT, lines: True)
-GPU LUT processing complete - finalizing...
-```
-
-#### 🧪 Validation Tip
-To verify GPU vs CPU parity: apply a neutral LUT (identity) – output must match original (apart from minor rounding < 1 level).
-
-#### 🔄 Free Line & Zoom Behavior
-Lines are reapplied after each LUT preview/final pass and after zoom/pan via a fast overlay path (`_fast_line_update`). If you still lose free lines, ensure you didn't rotate + disable lines; rotation fallback will trigger a full redraw including lines.
-
-#### 📈 Performance
-Typical speed-up on large 32MP images: multi-second CPU → sub-second GPU (device dependent).
-
----
-
 
 ### �️ **Fullscreen Mode**
 - **Immersive Viewing**: `⛶` toolbar button and `F11` shortcut for fullscreen
@@ -275,122 +231,6 @@ Typical speed-up on large 32MP images: multi-second CPU → sub-second GPU (devi
 - **Performance Tuning**: Improved bounds checking prevents line rendering issues
 
 ---
-
-## Complete Feature Summary - Enhanced Random Image Viewer
-
-### 🎯 **New Feature: Free Line Drawing Tool**
-- **Two-click line creation**: Draw straight lines between any two points
-- **UI Integration**: New `╱` toolbar button with mutually exclusive mode behavior
-- **Full rotation support**: Correct coordinate transformation for all rotation angles
-- **Enhanced line management**: Unified undo/clear system for all line types
-- **Robust rendering**: Improved bounds checking to prevent lines disappearing at certain zoom levels
-
-### 🚀 **Performance & Memory Optimizations**
-
-#### **Enhanced Caching System**
-- **Dual-layer caching**: Separate caches for base pixmaps and enhanced versions
-- **LRU-like behavior**: Automatic cache management with configurable size limits
-- **Smart cache keys**: Include enhancement settings, rotation, zoom, and pan in cache keys
-- **Garbage collection**: Periodic memory cleanup to prevent memory leaks
-- **Cache invalidation**: Intelligent clearing when settings change
-
-#### **Optimized Image Loading**
-- **Safe loading system**: Error handling for corrupted or unsupported image files
-- **Lazy thumbnail generation**: Only create thumbnails when history panel is visible
-- **Scaled reading**: Direct thumbnail scaling during file read for faster performance
-- **Large file handling**: Special handling and size display for files >10MB
-
-#### **Debounced Resize Handling**
-- **Resize timer**: 100ms debounce to prevent excessive recalculations during window resizing
-- **Delayed processing**: `_delayed_resize()` method to batch resize operations
-- **Performance monitoring**: Size tracking to optimize resize behavior
-
-### 🖥️ **Enhanced UI & Layout System**
-
-#### **Responsive Toolbar Layout**
-- **Dynamic two-row mode**: Automatically moves enhancement controls to second toolbar row when window width < 900px
-- **Intelligent switching**: Hysteresis prevents rapid mode switching
-- **State preservation**: Maintains slider values and settings during layout changes
-- **Visual feedback**: Debug logging and smooth transitions
-
-#### **Advanced Enhancement Controls**
-- **Extended ranges**: 
-  - Contrast: 0-200 (was more limited)
-  - Gamma: 0-200 with extreme values support
-  - Grayscale: 0-100 with smooth blending
-- **Fast rendering**: QPainter-based effects instead of pixel manipulation
-- **Multiple effect passes**: Additional overlay/multiply passes for extreme values
-- **Clickable sliders**: Enhanced slider interaction
-
-### 🔄 **Image Processing Improvements**
-
-#### **Unified Coordinate System**
-- **Consistent zoom handling**: Same logic for ALL zoom levels (no special cases)
-- **Accurate transformations**: Precise coordinate mapping for rotation and scaling
-- **Pan integration**: Proper offset handling in all drawing operations
-- **Bounds tolerance**: 10-pixel tolerance to prevent precision-related rendering issues
-
-#### **Enhanced Image Display**
-- **Rotation caching**: Cache rotated versions to improve performance
-- **Quality preservation**: High-quality scaling with Qt.SmoothTransformation
-- **Memory efficient**: Optimized pixmap creation and management
-- **Background filling**: Proper black background for images smaller than viewport
-
-### 📐 **Advanced Line Drawing System**
-
-#### **Three-Mode System**
-- **Vertical lines**: Original functionality preserved
-- **Horizontal lines**: Original functionality preserved  
-- **Free lines**: New two-point line drawing capability
-- **Mutual exclusion**: Only one mode active at a time
-- **State management**: Proper mode switching and cursor updates
-
-#### **Comprehensive Line Management**
-- **Smart undo**: Prioritized removal (free → horizontal → vertical)
-- **Unified clearing**: Single button clears all line types
-- **Thickness control**: 1-10px configurable thickness for all line types
-- **Persistence**: Lines cleared automatically on new image navigation
-- **Copy integration**: All lines included in clipboard copy operations
-
-### 🎨 **Visual & UX Enhancements**
-
-#### **Status Bar Improvements**
-- **Real-time feedback**: Clear status messages for all drawing operations
-- **Coordinate display**: Shows click coordinates during line creation
-- **Operation guidance**: Step-by-step instructions for complex operations
-- **File information**: Enhanced file size and dimension display
-
-#### **Cursor Management**
-- **Context-aware cursors**: Different cursors for different drawing modes
-- **Visual feedback**: Cross cursor for line drawing, arrow for navigation
-- **Mode indication**: Cursor changes reflect current tool state
-
-### 🛠️ **System Integration**
-
-#### **Enhanced History System**
-- **Improved navigation**: Better forward/backward history management
-- **Thumbnail optimization**: Conditional thumbnail creation for performance
-- **Memory efficient**: Lazy loading and cleanup of history items
-- **Visual indicators**: Better history panel integration
-
-#### **Cross-Platform Compatibility**
-- **File URL handling**: Proper Windows/Unix file path handling
-- **Explorer integration**: Platform-specific folder opening
-- **Path display**: Cross-platform file path presentation
-
-### 🔧 **Technical Infrastructure**
-
-#### **Error Handling**
-- **Safe image loading**: Graceful handling of corrupted files
-- **Exception management**: Try-catch blocks for critical operations
-- **User feedback**: Clear error messages in status bar
-- **Fallback behaviors**: Graceful degradation when operations fail
-
-#### **Memory Management**
-- **Cache size limits**: Configurable maximum cache sizes
-- **Automatic cleanup**: Periodic garbage collection
-- **Memory monitoring**: Cache hit/miss optimization
-- **Resource cleanup**: Proper painter and resource disposal
 
 This represents a significant evolution from a basic random image viewer to a professional-grade image analysis and annotation tool with enterprise-level performance optimizations and memory management.
 
@@ -594,6 +434,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
