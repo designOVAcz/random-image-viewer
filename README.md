@@ -374,7 +374,7 @@ On Windows systems, the application automatically detects your OS dark/light mod
 ## Screenshot
 
 ![Main Window](screenshots/main_window.png)
-*Main window with random image loaded*
+
 ---
 
 ## Compiling to a Standalone Binary
@@ -434,6 +434,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
