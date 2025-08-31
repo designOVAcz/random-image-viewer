@@ -24,6 +24,8 @@ A simple, modern, cross-platform desktop app to view random images from any fold
 
 ---
 
+## 🆕 **Latest Enhancements**
+
 ### 🔀 **Smart Navigation System (NEW)**
 
 Perfect for both random discovery and systematic browsing of image collections.
@@ -120,8 +122,6 @@ Advanced window manipulation when UI is hidden:
 ---(including subfolders). Great for artists, inspiration, or just browsing your photo collection!
 
 ---
-
-## 🆕 **Latest Enhancements**
 
 ### CUBE LUT Support
 
@@ -239,38 +239,30 @@ This represents a significant evolution from a basic random image viewer to a pr
 ## Installation
 
 1. **Clone this repo:**
-   ```sh
-   git clone https://github.com/YOUR_USERNAME/random-image-viewer.git
-   cd random-image-viewer
-   ```
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/random-image-viewer.git
+    cd random-image-viewer
+    ```
 
-2. **Install [uv](https://github.com/astral-sh/uv) (if you don't have it):**
-   ```sh
-   pip install uv
-   ```
+2. **Install dependencies:**
 
-3. **Install dependencies:**
-   ```sh
-   uv pip install -r pyproject.toml
-   # or just
-   uv pip install pyside6
-   ```
-
-### 🎨 **Theme Detection (Windows)**
-On Windows systems, the application automatically detects your OS dark/light mode preference from the registry. No additional setup required - it just works!
+    ```bash
+    pip install PySide6
+    ```
 
 ---
 
 ## How to Run
 
-- **With uv:**
-  ```sh
-  uv run main.py
-  ```
-- **Or with Python:**
-  ```sh
-  python main.py
-  ```
+### Windows/macOS/Linux
+
+- Open a terminal in the project folder.
+- Run:
+    ```bash
+    python main.py
+    ```
+
+> **Note:** On some systems, you may need to use `python` instead of `python3` depending on how Python is installed.
 
 ---
 
@@ -434,6 +426,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
