@@ -805,12 +805,12 @@ class ImageLabel(QLabel):
             fullscreen_action.triggered.connect(lambda: self.parent_viewer.toggle_fullscreen(True))
             menu.addAction(fullscreen_action)
         
-        # Toolbar visibility toggle (especially useful in fullscreen)
-        toolbar_action = QAction("Show/Hide Toolbar", self)
-        toolbar_action.setCheckable(True)
-        toolbar_action.setChecked(self.parent_viewer.main_toolbar.isVisible())
-        toolbar_action.toggled.connect(self.parent_viewer.toggle_toolbar_visibility)
-        menu.addAction(toolbar_action)
+        # UI visibility toggle (especially useful in fullscreen)
+        ui_toggle_action = QAction("Show/Hide UI Elements", self)
+        ui_toggle_action.setCheckable(True)
+        ui_toggle_action.setChecked(self.parent_viewer.main_toolbar.isVisible())
+        ui_toggle_action.toggled.connect(self.parent_viewer.toggle_toolbar_visibility)
+        menu.addAction(ui_toggle_action)
         
         menu.addSeparator()
         
@@ -1958,6 +1958,16 @@ class RandomImageViewer(QMainWindow):
         
         # Sorting mode for navigation
         self.random_mode = True  # Default to random mode
+        
+        # Store original window flags for UI toggle
+        self.original_window_flags = None
+        
+        # Window dragging and resizing for frameless mode
+        self.dragging = False
+        self.drag_start_position = None
+        self.resizing = False
+        self.resize_edge = None
+        self.resize_margin = 10  # Pixel margin for resize detection
         self.timer.timeout.connect(self._on_timer_tick)
 
         self.init_ui()
@@ -1966,6 +1976,10 @@ class RandomImageViewer(QMainWindow):
             self.resize(885, 700)
         except Exception as _e:
             pass
+        
+        # Store original window flags for UI toggle functionality
+        self.original_window_flags = self.windowFlags()
+        
         # Force layout evaluation after initial resize
         QTimer.singleShot(0, self._delayed_resize)
         # Auto-set default LUT folder if present
@@ -4077,18 +4091,32 @@ class RandomImageViewer(QMainWindow):
             self.status.showMessage("Image order set to Alphabetical")
 
     def toggle_toolbar_visibility(self, checked):
-        """Toggle visibility of the main toolbar and slider toolbar."""
+        """Toggle visibility of toolbars, status bar, and window decorations for immersive viewing."""
         if checked:
-            # Show toolbars
+            # Show all UI elements
             self.main_toolbar.show()
             if self.two_row_mode:
                 self.slider_toolbar.show()
-            self.status.showMessage("Toolbar shown")
+            self.status.show()
+            
+            # Restore original window decorations
+            if self.original_window_flags is not None:
+                self.setWindowFlags(self.original_window_flags)
+                self.show()  # Need to call show() after changing window flags
+            
+            self.status.showMessage("UI elements restored")
         else:
-            # Hide toolbars
+            # Hide all UI elements for immersive experience
             self.main_toolbar.hide()
             self.slider_toolbar.hide()
-            self.status.showMessage("Toolbar hidden - Right-click to show")
+            
+            # Remove window decorations (borderless window) 
+            self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+            self.show()  # Need to call show() after changing window flags
+            
+            # Show temporary message before hiding status bar
+            self.status.showMessage("Immersive mode - Right-click to restore UI")
+            QTimer.singleShot(2000, lambda: self.status.hide() if not self.main_toolbar.isVisible() else None)  # Hide status after 2 seconds
 
     def toggle_line_drawing(self, checked):
         self.line_drawing_mode = checked
@@ -6285,6 +6313,167 @@ class RandomImageViewer(QMainWindow):
             else:
                 self.image_label.setText("No images found in selected folder or its subfolders.")
             self._reset_timer()
+
+    def mousePressEvent(self, event):
+        """Handle mouse press for window dragging and resizing in frameless mode."""
+        # Only handle dragging/resizing when UI is hidden (frameless mode)
+        if self.main_toolbar.isVisible() or not (self.windowFlags() & Qt.FramelessWindowHint):
+            super().mousePressEvent(event)
+            return
+
+        if event.button() == Qt.LeftButton or event.button() == Qt.RightButton:
+            self.drag_start_position = event.globalPosition().toPoint()
+            
+            # Check if we're near an edge for resizing (only for left-click)
+            pos = event.position().toPoint()
+            window_rect = self.rect()
+            margin = self.resize_margin
+            
+            # Determine resize edge with proper corner detection
+            resize_edge = ""
+            at_left = pos.x() <= margin
+            at_right = pos.x() >= window_rect.width() - margin
+            at_top = pos.y() <= margin
+            at_bottom = pos.y() >= window_rect.height() - margin
+            
+            # Handle corners first (combination of edges)
+            if at_top and at_left:
+                resize_edge = "topleft"
+            elif at_top and at_right:
+                resize_edge = "topright"
+            elif at_bottom and at_left:
+                resize_edge = "bottomleft"
+            elif at_bottom and at_right:
+                resize_edge = "bottomright"
+            # Then handle single edges
+            elif at_top:
+                resize_edge = "top"
+            elif at_bottom:
+                resize_edge = "bottom"
+            elif at_left:
+                resize_edge = "left"
+            elif at_right:
+                resize_edge = "right"
+            
+            # Left-click: resize if on edge, otherwise drag
+            # Right-click: always drag (even on edges)
+            if event.button() == Qt.LeftButton and resize_edge:
+                self.resizing = True
+                self.resize_edge = resize_edge
+                self.setCursor(self._get_resize_cursor(resize_edge))
+            else:
+                self.dragging = True
+                self.setCursor(Qt.ClosedHandCursor)
+        
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for window dragging and resizing in frameless mode."""
+        # Only handle dragging/resizing when UI is hidden (frameless mode)
+        if self.main_toolbar.isVisible() or not (self.windowFlags() & Qt.FramelessWindowHint):
+            super().mouseMoveEvent(event)
+            return
+
+        if event.buttons() & (Qt.LeftButton | Qt.RightButton):
+            if self.dragging and self.drag_start_position:
+                # Move window (works with both left and right mouse buttons)
+                diff = event.globalPosition().toPoint() - self.drag_start_position
+                self.move(self.pos() + diff)
+                self.drag_start_position = event.globalPosition().toPoint()
+            
+            elif self.resizing and self.resize_edge and self.drag_start_position:
+                # Resize window (only works with left mouse button)
+                current_pos = event.globalPosition().toPoint()
+                diff = current_pos - self.drag_start_position
+                
+                geometry = self.geometry()
+                min_size = self.minimumSize()
+                
+                if "left" in self.resize_edge:
+                    new_width = geometry.width() - diff.x()
+                    if new_width >= min_size.width():
+                        geometry.setLeft(geometry.left() + diff.x())
+                        geometry.setWidth(new_width)
+                
+                if "right" in self.resize_edge:
+                    new_width = geometry.width() + diff.x()
+                    if new_width >= min_size.width():
+                        geometry.setWidth(new_width)
+                
+                if "top" in self.resize_edge:
+                    new_height = geometry.height() - diff.y()
+                    if new_height >= min_size.height():
+                        geometry.setTop(geometry.top() + diff.y())
+                        geometry.setHeight(new_height)
+                
+                if "bottom" in self.resize_edge:
+                    new_height = geometry.height() + diff.y()
+                    if new_height >= min_size.height():
+                        geometry.setHeight(new_height)
+                
+                self.setGeometry(geometry)
+                self.drag_start_position = current_pos
+        else:
+            # Update cursor when hovering near edges
+            pos = event.position().toPoint()
+            window_rect = self.rect()
+            margin = self.resize_margin
+            
+            resize_edge = ""
+            at_left = pos.x() <= margin
+            at_right = pos.x() >= window_rect.width() - margin
+            at_top = pos.y() <= margin
+            at_bottom = pos.y() >= window_rect.height() - margin
+            
+            # Handle corners first (combination of edges)
+            if at_top and at_left:
+                resize_edge = "topleft"
+            elif at_top and at_right:
+                resize_edge = "topright"
+            elif at_bottom and at_left:
+                resize_edge = "bottomleft"
+            elif at_bottom and at_right:
+                resize_edge = "bottomright"
+            # Then handle single edges
+            elif at_top:
+                resize_edge = "top"
+            elif at_bottom:
+                resize_edge = "bottom"
+            elif at_left:
+                resize_edge = "left"
+            elif at_right:
+                resize_edge = "right"
+            
+            if resize_edge:
+                self.setCursor(self._get_resize_cursor(resize_edge))
+            else:
+                self.setCursor(Qt.ArrowCursor)
+        
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release to end dragging/resizing."""
+        if event.button() == Qt.LeftButton or event.button() == Qt.RightButton:
+            self.dragging = False
+            self.resizing = False
+            self.resize_edge = None
+            self.drag_start_position = None
+            self.setCursor(Qt.ArrowCursor)
+        
+        super().mouseReleaseEvent(event)
+
+    def _get_resize_cursor(self, edge):
+        """Get appropriate cursor for resize edge - matches standard window resize cursors."""
+        if edge == "top" or edge == "bottom":
+            return Qt.SizeVerCursor  # Vertical resize (↕)
+        elif edge == "left" or edge == "right":
+            return Qt.SizeHorCursor  # Horizontal resize (↔)
+        elif edge == "topleft" or edge == "bottomright":
+            return Qt.SizeFDiagCursor  # Diagonal resize (\)
+        elif edge == "topright" or edge == "bottomleft":
+            return Qt.SizeBDiagCursor  # Diagonal resize (/)
+        else:
+            return Qt.ArrowCursor
 
 if __name__ == "__main__":
     # Defer Qt allocations until after QApplication is created
