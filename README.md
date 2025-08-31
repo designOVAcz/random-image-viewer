@@ -375,7 +375,7 @@ You can compile this app to a standalone executable for Windows, Linux, or Mac u
 
 1. **Install PyInstaller:**
    ```sh
-   uv pip install pyinstaller
+   pip install pyinstaller
    ```
 2. **Build the Executable:**
    ```sh
@@ -426,6 +426,7 @@ MIT License.
 
 
 **Enjoy browsing your images!**
+
 
 
 
