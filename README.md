@@ -66,14 +66,24 @@ A simple, modern, cross-platform desktop app to view random images from any fold
 
 ---
 
+## Compiling to a Standalone Binary
+
+You can compile this app to a standalone executable for Windows, Linux, or Mac using [PyInstaller](https://pyinstaller.org/).
+
+1. **Install PyInstaller:**
+   ```sh
+   pip install pyinstaller
+   ```
+2. **Build the Executable:**
+   ```sh
+   pyinstaller --noconfirm --onefile --windowed main.py
+   ```
+   - The binary will be in the `dist/` folder.
+   - For cross-compiling, build on the target OS or use a cross-compilation toolchain.
+
+---
+
 ## License
 
 MIT License. **Enjoy browsing your images!**
-
-
-
-
-
-
-
 
