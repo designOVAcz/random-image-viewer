@@ -1881,6 +1881,10 @@ class RandomImageViewer(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setWindowTitle("Random Image Viewer")
         self.setGeometry(100, 100, 950, 650)
+        
+        # Enable drag and drop for folders
+        self.setAcceptDrops(True)
+        
         self.folder = None
         self.images = []
         self.history = []
@@ -2120,10 +2124,13 @@ class RandomImageViewer(QMainWindow):
         print("Global shortcuts set up successfully")
 
     def emergency_exit_fullscreen(self):
-        """Emergency exit from fullscreen"""
+        """Emergency exit from fullscreen or minimal mode"""
         print("EMERGENCY: Escape shortcut activated")
         if self.is_fullscreen:
             self.force_exit_fullscreen()
+        elif not self.main_toolbar.isVisible():
+            print("EMERGENCY: Restoring UI from minimal mode")
+            self.toggle_toolbar_visibility(True)  # Show UI
 
     def emergency_toggle_fullscreen(self):
         """Emergency toggle fullscreen"""
@@ -6171,7 +6178,7 @@ class RandomImageViewer(QMainWindow):
             print("F11 pressed - toggling fullscreen")
             self.toggle_fullscreen()
         elif event.key() == Qt.Key_Escape:
-            # Always try to exit fullscreen on Escape
+            # Priority 1: Exit fullscreen if in fullscreen mode
             if self.is_fullscreen:
                 print("Escape pressed - exiting fullscreen")
                 if event.modifiers() & Qt.ControlModifier:
@@ -6179,6 +6186,10 @@ class RandomImageViewer(QMainWindow):
                     self.force_exit_fullscreen()
                 else:
                     self.exit_fullscreen()
+            # Priority 2: Show UI if in minimal mode (UI hidden)
+            elif not self.main_toolbar.isVisible():
+                print("Escape pressed - restoring UI from minimal mode")
+                self.toggle_toolbar_visibility(True)  # Show UI
             else:
                 super().keyPressEvent(event)
         elif event.modifiers() & Qt.ControlModifier:
@@ -6474,6 +6485,72 @@ class RandomImageViewer(QMainWindow):
             return Qt.SizeBDiagCursor  # Diagonal resize (/)
         else:
             return Qt.ArrowCursor
+
+    def dragEnterEvent(self, event):
+        """Handle drag enter events - accept folder drops."""
+        if event.mimeData().hasUrls():
+            # Check if any of the dragged items are directories
+            urls = event.mimeData().urls()
+            for url in urls:
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if os.path.isdir(file_path):
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        """Handle drag move events."""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        """Handle drop events - open dropped folders."""
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            for url in urls:
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if os.path.isdir(file_path):
+                        print(f"Folder dropped: {file_path}")
+                        self.folder = file_path
+                        self.images = get_images_in_folder(file_path)
+                        self.history.clear()
+                        self.history_list.clear()
+                        self.history_list.repaint()
+                        self.current_image = None
+                        self.history_index = -1  # Reset history navigation
+                        self.update_image_info()
+                        self._update_title()
+                        
+                        if self.images:
+                            # Use mode-aware navigation when opening dropped folder
+                            if self.random_mode:
+                                self.show_random_image()
+                            else:
+                                # In alphabetical mode, start with the first image
+                                first_image = self.images[0]
+                                self._display_image_with_lut_preview(first_image)
+                                self.add_to_history(first_image)
+                                self.current_image = first_image
+                                self.update_image_info(first_image)
+                                self.set_status_path(first_image)
+                                if self._auto_advance_active:
+                                    self.timer_remaining = self.timer_spin.value()
+                                    self._update_ring()
+                        else:
+                            self.image_label.setText("No images found in dropped folder or its subfolders.")
+                        
+                        self._reset_timer()
+                        self.status.showMessage(f"Loaded folder: {os.path.basename(file_path)} ({len(self.images)} images)")
+                        event.acceptProposedAction()
+                        return
+            
+            event.ignore()
+        else:
+            event.ignore()
 
 if __name__ == "__main__":
     # Defer Qt allocations until after QApplication is created
