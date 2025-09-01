@@ -1882,6 +1882,9 @@ class RandomImageViewer(QMainWindow):
         self.setWindowTitle("Random Image Viewer")
         self.setGeometry(100, 100, 950, 650)
         
+        # Set window icon
+        self.set_window_icon()
+        
         # Enable drag and drop for folders
         self.setAcceptDrops(True)
         
@@ -1975,7 +1978,7 @@ class RandomImageViewer(QMainWindow):
         self.timer.timeout.connect(self._on_timer_tick)
 
         self.init_ui()
-        # Set initial window geometry (width 885 triggers two-row layout below threshold 900)
+        # Set initial window geometry (width 885 triggers two-row layout below threshold 1500)
         try:
             self.resize(885, 700)
         except Exception as _e:
@@ -2005,6 +2008,52 @@ class RandomImageViewer(QMainWindow):
             except Exception as e:
                 print(f"Failed loading default LUT folder {self.default_lut_path}: {e}")
 
+    def set_window_icon(self):
+        """Set the window icon from available icon files"""
+        try:
+            import os
+            import sys
+            
+            # Determine the correct path for icon files
+            if getattr(sys, 'frozen', False):
+                # Running as PyInstaller executable
+                base_path = sys._MEIPASS  # PyInstaller's temporary folder
+                print(f"Running as executable, looking for icons in: {base_path}")
+            else:
+                # Running as Python script
+                base_path = os.path.dirname(__file__)
+                print(f"Running as script, looking for icons in: {base_path}")
+            
+            icon_loaded = False
+            
+            # Try different icon formats in order of preference
+            icon_files = [
+                ("icon.svg", "SVG"),
+                ("icon.png", "PNG"), 
+                ("icon.ico", "ICO")
+            ]
+            
+            for filename, format_name in icon_files:
+                icon_path = os.path.join(base_path, filename)
+                print(f"Trying icon path: {icon_path}")
+                if os.path.exists(icon_path):
+                    icon = QIcon(icon_path)
+                    if not icon.isNull():
+                        self.setWindowIcon(icon)
+                        print(f"✅ Window icon loaded from {format_name}: {filename}")
+                        icon_loaded = True
+                        break
+                else:
+                    print(f"❌ Icon not found: {icon_path}")
+            
+            if not icon_loaded:
+                print("ℹ️ No icon file found (tried: icon.svg, icon.png, icon.ico)")
+                
+        except Exception as e:
+            print(f"⚠️ Failed to load window icon: {e}")
+            import traceback
+            traceback.print_exc()
+
     def init_ui(self):
         # Create main toolbar
         self.main_toolbar = QToolBar("Main Toolbar")
@@ -2028,7 +2077,7 @@ class RandomImageViewer(QMainWindow):
 
         # Track which mode we're in
         self.two_row_mode = False
-        self.width_threshold = 900  # Increased threshold - switch to two rows below this width
+        self.width_threshold = 1500  # Higher threshold - switch to two rows below this width (was 900)
 
         # Setup main toolbar with all controls
         self._setup_main_toolbar()
@@ -2693,8 +2742,16 @@ class RandomImageViewer(QMainWindow):
         if hasattr(self, 'current_image') and self.current_image != img_path:
             self.clear_lut_cache()
         
-        # Create cache key including enhancement settings, rotation, and flips
-        cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}_{self.flipped_h}_{self.flipped_v}_{self.current_lut_name}_{self.lut_strength}"
+        # Create cache key including enhancement settings, rotation, flips, and line information
+        lines_info = ""
+        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            # Include line count and visibility in cache key since LUT processing differs with/without lines
+            vlines = len(self.drawn_lines) if self.drawn_lines else 0
+            hlines = len(self.drawn_horizontal_lines) if self.drawn_horizontal_lines else 0
+            flines = len(self.drawn_free_lines) if self.drawn_free_lines else 0
+            lines_info = f"_lines_{vlines}_{hlines}_{flines}_{self.line_color.name()}_{self.line_thickness}"
+        
+        cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}_{self.flipped_h}_{self.flipped_v}_{self.current_lut_name}_{self.lut_strength}{lines_info}"
         
         # Check enhanced cache first
         if cache_key in self.enhancement_cache:
@@ -2722,34 +2779,12 @@ class RandomImageViewer(QMainWindow):
                     # Use cached full-quality LUT result
                     pixmap = self._lut_process_cache[lut_cache_key].copy()
                 else:
-                    # Need full LUT processing - especially important for lines
-                    if (self.lines_visible and 
-                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)):
-                        # Lines present: FORCE full quality async LUT processing
-                        self.current_image = img_path  # Set this first
-                        
-                        # Show fast preview immediately while full processing happens
-                        self.status.showMessage(f"Rendering lines with LUT... (preview)")
-                        QApplication.processEvents()
-                        
-                        # Create fast preview with lines for immediate feedback
-                        fast_pixmap = self.apply_fast_enhancements(base_pixmap.copy())
-                        
-                        # Apply basic transforms to preview
-                        if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
-                            fast_pixmap = self._apply_quick_transforms(fast_pixmap)
-                        
-                        # Scale and show preview immediately
-                        preview_scaled = self._scale_pixmap(fast_pixmap, img_path)
-                        self.image_label.setPixmap(preview_scaled)
-                        QApplication.processEvents()
-                        
-                        # Start full quality processing
-                        self._start_async_lut_processing()
-                        return  # Exit here - async processing will complete display
-                    else:
-                        # No lines: Can use fast enhancement for quick preview
-                        pixmap = self.apply_fast_enhancements(base_pixmap.copy())
+                    # Need full LUT processing - use SAME processing path regardless of lines
+                    # Apply LUT BEFORE enhancements for correct color processing
+                    lut_pixmap = self.apply_lut_to_image(base_pixmap.copy(), self.current_lut, self.lut_strength)
+                    pixmap = self.apply_fast_enhancements(lut_pixmap)
+                    
+                    # No async processing - use direct processing for consistent results
             elif self.grayscale_value > 0 or self.contrast_value != 50 or self.gamma_value != 0:
                 # Only basic enhancements needed
                 pixmap = self.apply_fast_enhancements(base_pixmap.copy())
@@ -4903,16 +4938,11 @@ class RandomImageViewer(QMainWindow):
         self._last_processed_has_lut = False
         
         if self.current_image:
-            # Show immediate preview with fast processing for responsiveness
-            if self.current_lut:
-                self.status.showMessage(f"Applying {lut_name}... (instant preview)")
-                QApplication.processEvents()
-                
-                # Create fast preview first (smaller image, low quality)
-                self._create_fast_lut_preview()
-            
-            # Then apply full quality in background with progress
-            QTimer.singleShot(10, self._apply_full_quality_lut)
+            # Use unified processing pipeline for consistency
+            self.display_image(self.current_image)
+            if self.current_lut and self.lut_enabled:
+                lut_name_display = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+                self.status.showMessage(f"{lut_name_display} applied")
 
     def toggle_lut_enabled(self, checked):
         """Toggle current LUT on/off without losing selection."""
@@ -5793,7 +5823,7 @@ class RandomImageViewer(QMainWindow):
         return pixmap
 
     def update_lut_strength(self, value):
-        """Update LUT application strength with fast preview and async full quality"""
+        """Update LUT application strength using unified processing pipeline"""
         self.lut_strength = value
         
         # Clear caches for immediate update (including LUT process cache)
@@ -5807,24 +5837,13 @@ class RandomImageViewer(QMainWindow):
             self._last_processed_image = None
         self._last_processed_has_lut = False
         
-        # Show immediate update without heavy processing
-        if self.lut_enabled and self.current_image and self.current_lut:
-            if value > 0:
-                # Show fast preview first
-                self.status.showMessage(f"LUT strength: {value}% (instant preview)")
-                QApplication.processEvents()
-                self._create_fast_lut_preview()
-                
-                # Then apply full quality asynchronously
-                QTimer.singleShot(10, self._apply_full_quality_lut)
-            else:
-                # No LUT strength, use normal display
-                self.display_image(self.current_image)
-                self.status.showMessage("LUT disabled (strength: 0%)")
-        elif self.current_image:
-            # No LUT active, just update normally
+        # Use the same processing path as display_image for consistency
+        if self.current_image:
             self.display_image(self.current_image)
-            if value == 0:
+            if self.lut_enabled and self.current_lut and value > 0:
+                lut_name = self.current_lut_name if self.current_lut_name != "None" else "LUT"
+                self.status.showMessage(f"{lut_name} strength: {value}%")
+            elif value == 0:
                 self.status.showMessage("LUT disabled (strength: 0%)")
             else:
                 self.status.showMessage(f"LUT strength: {value}% (no LUT selected)")
@@ -6203,6 +6222,10 @@ class RandomImageViewer(QMainWindow):
                 self.flip_horizontal()
             elif event.key() == Qt.Key_V:
                 self.flip_vertical()
+            elif event.key() == Qt.Key_U:
+                # Toggle UI visibility (minimal mode)
+                is_ui_visible = self.main_toolbar.isVisible()
+                self.toggle_toolbar_visibility(not is_ui_visible)
             elif event.key() == Qt.Key_R:
                 # Reset all enhancements
                 self.reset_enhancements()
