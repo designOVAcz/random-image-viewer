@@ -83,7 +83,25 @@ You can compile this app to a standalone executable for Windows, Linux, or Mac u
 
 ---
 
+## Compiling to a Standalone Binary
+
+You can compile this app to a standalone executable for Windows, Linux, or Mac using [PyInstaller](https://pyinstaller.org/).
+
+1. **Install PyInstaller:**
+   ```sh
+   pip install pyinstaller
+   ```
+2. **Build the Executable:**
+   ```sh
+   python -m PyInstaller --onefile --windowed --icon=pdf_viewer_icon.ico --name="GPU PDF Viewer" --clean --noconfirm main.py
+   ```
+   - The binary will be in the `dist/` folder.
+   - For cross-compiling, build on the target OS or use a cross-compilation toolchain.
+
+---
+
 ## License
 
 MIT License. **Enjoy browsing your images!**
+
 
