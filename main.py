@@ -577,17 +577,21 @@ class ImageLabel(QLabel):
             return
         
         # Handle left-click for line drawing
-        if (self.parent_viewer and 
-            (self.parent_viewer.line_drawing_mode or self.parent_viewer.horizontal_line_drawing_mode or self.parent_viewer.free_line_drawing_mode) and 
-            event.button() == Qt.LeftButton and 
+        if (self.parent_viewer and event.button() == Qt.LeftButton and 
             self.pixmap() and not self.pixmap().isNull()):
+            
+            # Check if any drawing mode is active
+            is_any_drawing_mode = (self.parent_viewer.line_drawing_mode or 
+                                 self.parent_viewer.horizontal_line_drawing_mode or 
+                                 self.parent_viewer.free_line_drawing_mode or 
+                                 self.parent_viewer.free_draw_mode)
+            
+            if not is_any_drawing_mode:
+                super().mousePressEvent(event)
+                return
             
             # Get click position
             click_pos = event.position()
-            
-            # Get the currently displayed pixmap and label size
-            displayed_pixmap = self.pixmap()
-            label_size = self.size()
             
             # Get original image for coordinate reference
             try:
@@ -612,6 +616,7 @@ class ImageLabel(QLabel):
             
             # UNIFIED coordinate conversion - use the SAME logic as in display_image
             # Calculate the base scaled size that would be used at 100% zoom
+            label_size = self.size()
             base_scaled = display_reference_size.scaled(label_size, Qt.KeepAspectRatio)
             
             # Apply zoom factor to get the actual displayed size
@@ -690,26 +695,80 @@ class ImageLabel(QLabel):
                     self.parent_viewer.add_hline(original_y)
                 if self.parent_viewer.free_line_drawing_mode:
                     self.parent_viewer.add_free_line_point(original_x, original_y)
+                if self.parent_viewer.free_draw_mode:
+                    print(f"DEBUG: Mouse press in free draw mode at ({original_x:.1f}, {original_y:.1f})")
+                    self.parent_viewer.start_free_draw_stroke(original_x, original_y)
         
         super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event):
-        if self.is_panning and self.last_pan_point is not None:
-            # Calculate pan delta
+        # Handle panning (now checks for right-click)
+        if self.is_panning and (event.buttons() & Qt.RightButton) and self.last_pan_point is not None:
             current_point = event.position()
             delta_x = current_point.x() - self.last_pan_point.x()
             delta_y = current_point.y() - self.last_pan_point.y()
             
-            # Update pan offset
             self.pan_offset_x += delta_x
             self.pan_offset_y += delta_y
-            
-            # Update last point
             self.last_pan_point = current_point
             
-            # Refresh the display using smart zoom system to preserve LUT processing
             if self.parent_viewer and self.parent_viewer.current_image:
                 self.parent_viewer._smart_zoom_display()
+            
+            event.accept()
+            return
+
+        # ⚡ OPTIMIZED: Handle free draw mode with ultra-fast real-time painting
+        if (self.parent_viewer and self.parent_viewer.free_draw_mode and 
+            self.parent_viewer.is_drawing_free_stroke and event.buttons() & Qt.LeftButton and
+            self.pixmap() and not self.pixmap().isNull()):
+            
+            # ⚡ ULTRA-FAST: Use cached coordinate conversion
+            if not self.parent_viewer.drawing_cache:
+                return  # Cache not ready
+                
+            click_pos = event.position()
+            cache = self.parent_viewer.drawing_cache
+            
+            # ⚡ LIGHTNING-FAST: Pre-calculated coordinate conversion
+            rel_x = click_pos.x() - cache['draw_x']
+            rel_y = click_pos.y() - cache['draw_y']
+            
+            # ⚡ INSTANT BOUNDS CHECK: Pre-calculated dimensions
+            if (0 <= rel_x <= cache['zoomed_width'] and 0 <= rel_y <= cache['zoomed_height']):
+                # ⚡ PRE-COMPUTED SCALE FACTORS: No division during drawing
+                rotation = cache['rotation']
+                original_size = cache['original_size']
+                
+                if rotation == 90 or rotation == 270:
+                    scale_x = cache['zoomed_width'] / original_size.height()
+                    scale_y = cache['zoomed_height'] / original_size.width()
+                else:
+                    scale_x = cache['zoomed_width'] / original_size.width()
+                    scale_y = cache['zoomed_height'] / original_size.height()
+                
+                display_x = rel_x / scale_x
+                display_y = rel_y / scale_y
+                
+                # ⚡ OPTIMIZED ROTATION: Pre-calculated transformations
+                if rotation == 0:
+                    unrotated_x, unrotated_y = display_x, display_y
+                elif rotation == 90:
+                    unrotated_x, unrotated_y = display_y, original_size.width() - display_x
+                elif rotation == 180:
+                    unrotated_x, unrotated_y = original_size.width() - display_x, original_size.height() - display_y
+                else: # 270
+                    unrotated_x, unrotated_y = original_size.height() - display_y, display_x
+                
+                # ⚡ FAST FLIP TRANSFORMATIONS: Pre-calculated
+                original_x, original_y = unrotated_x, unrotated_y
+                if cache['flipped_h']:
+                    original_x = original_size.width() - unrotated_x
+                if cache['flipped_v']:
+                    original_y = original_size.height() - unrotated_y
+                
+                # ⚡ REAL-TIME PERFORMANCE: Add point with immediate visual feedback
+                self.parent_viewer.add_free_draw_point(original_x, original_y)
             
             event.accept()
             return
@@ -721,6 +780,14 @@ class ImageLabel(QLabel):
             self.is_panning = False
             self.last_pan_point = None
             self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        
+        # Handle free draw mode mouse release
+        if (event.button() == Qt.LeftButton and self.parent_viewer and 
+            self.parent_viewer.free_draw_mode and self.parent_viewer.is_drawing_free_stroke):
+            print(f"DEBUG: Mouse release in free draw mode")
+            self.parent_viewer.end_free_draw_stroke()
             event.accept()
             return
         
@@ -811,6 +878,13 @@ class ImageLabel(QLabel):
         ui_toggle_action.setChecked(self.parent_viewer.main_toolbar.isVisible())
         ui_toggle_action.toggled.connect(self.parent_viewer.toggle_toolbar_visibility)
         menu.addAction(ui_toggle_action)
+        
+        # Always on top toggle
+        always_on_top_action = QAction("Always on Top", self)
+        always_on_top_action.setCheckable(True)
+        always_on_top_action.setChecked(self.parent_viewer.always_on_top)
+        always_on_top_action.toggled.connect(self.parent_viewer.toggle_always_on_top)
+        menu.addAction(always_on_top_action)
         
         menu.addSeparator()
         
@@ -1643,7 +1717,7 @@ class RandomImageViewer(QMainWindow):
         try:
             if not self.current_image:
                 return
-            if not (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            if not (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                 return
             if not self.lines_visible:
                 return
@@ -1834,6 +1908,48 @@ class RandomImageViewer(QMainWindow):
                         painter.setRenderHint(QPainter.Antialiasing, True)
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         painter.setRenderHint(QPainter.Antialiasing, False)
+                    
+                    # ⚡ DRAW FREE STROKES WITH TRANSFORMS: Handle free draw strokes with transformations
+                    if self.drawn_free_strokes:
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                
+                                # Apply flip transformations first
+                                flip_start_x = start_x if not self.flipped_h else original_size.width() - start_x
+                                flip_start_y = start_y if not self.flipped_v else original_size.height() - start_y
+                                flip_end_x = end_x if not self.flipped_h else original_size.width() - end_x
+                                flip_end_y = end_y if not self.flipped_v else original_size.height() - end_y
+                                
+                                # Then apply rotation transformation
+                                if self.rotation_angle == 90:
+                                    display_start_x = int(flip_start_y * scale_x) + offset_x
+                                    display_start_y = int((original_size.width() - flip_start_x) * scale_y) + offset_y
+                                    display_end_x = int(flip_end_y * scale_x) + offset_x
+                                    display_end_y = int((original_size.width() - flip_end_x) * scale_y) + offset_y
+                                elif self.rotation_angle == 180:
+                                    display_start_x = int((original_size.width() - flip_start_x) * scale_x) + offset_x
+                                    display_start_y = int((original_size.height() - flip_start_y) * scale_y) + offset_y
+                                    display_end_x = int((original_size.width() - flip_end_x) * scale_x) + offset_x
+                                    display_end_y = int((original_size.height() - flip_end_y) * scale_y) + offset_y
+                                elif self.rotation_angle == 270:
+                                    display_start_x = int((original_size.height() - flip_start_y) * scale_x) + offset_x
+                                    display_start_y = int(flip_start_x * scale_y) + offset_y
+                                    display_end_x = int((original_size.height() - flip_end_y) * scale_x) + offset_x
+                                    display_end_y = int(flip_end_x * scale_y) + offset_y
+                                else:
+                                    # No rotation, just flips applied
+                                    display_start_x = int(flip_start_x * scale_x) + offset_x
+                                    display_start_y = int(flip_start_y * scale_y) + offset_y
+                                    display_end_x = int(flip_end_x * scale_x) + offset_x
+                                    display_end_y = int(flip_end_y * scale_y) + offset_y
+                                
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
                 else:
                     # No transformations needed - simple case
                     for x in self.drawn_lines:
@@ -1848,6 +1964,19 @@ class RandomImageViewer(QMainWindow):
                         (sx, sy) = line['start']; (ex, ey) = line['end']
                         painter.drawLine(int(sx * scale_x) + offset_x, int(sy * scale_y) + offset_y,
                                          int(ex * scale_x) + offset_x, int(ey * scale_y) + offset_y)
+                    
+                    # ⚡ DRAW FREE STROKES: Render completed free draw strokes  
+                    if self.drawn_free_strokes:
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                painter.drawLine(int(start_x * scale_x) + offset_x, int(start_y * scale_y) + offset_y,
+                                               int(end_x * scale_x) + offset_x, int(end_y * scale_y) + offset_y)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
             else:
                 # Fallback simple proportional scaling when transform computation fails
                 if hasattr(self, 'original_pixmap') and self.original_pixmap:
@@ -1869,6 +1998,19 @@ class RandomImageViewer(QMainWindow):
                 for line in self.drawn_free_lines:
                     (sx, sy) = line['start']; (ex, ey) = line['end']
                     painter.drawLine(int(sx * scale_x), int(sy * scale_y), int(ex * scale_x), int(ey * scale_y))
+                
+                # ⚡ DRAW FREE STROKES (FALLBACK): Render completed free draw strokes
+                if self.drawn_free_strokes:
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    for stroke in self.drawn_free_strokes:
+                        if len(stroke) < 2:
+                            continue
+                        for i in range(len(stroke) - 1):
+                            start_x, start_y = stroke[i]
+                            end_x, end_y = stroke[i + 1]
+                            painter.drawLine(int(start_x * scale_x), int(start_y * scale_y),
+                                           int(end_x * scale_x), int(end_y * scale_y))
+                    painter.setRenderHint(QPainter.Antialiasing, False)
             painter.end()
             self.image_label.setPixmap(overlay)
         except Exception as e:
@@ -1909,14 +2051,30 @@ class RandomImageViewer(QMainWindow):
         self.line_drawing_mode = False
         self.horizontal_line_drawing_mode = False
         self.free_line_drawing_mode = False  # New: Free line drawing mode
+        self.free_draw_mode = False  # NEW: Free draw mode (continuous drawing)
+        self.is_drawing_free_stroke = False  # Track if currently drawing a free stroke
+        
+        # ⚡ PERFORMANCE: Real-time drawing optimization
+        self.drawing_cache = None  # Cache converted coordinates and display data
+        self.temp_stroke_overlay = None  # Temporary overlay for real-time drawing
+        self.last_draw_point = None  # Track last painted point for incremental drawing
+        
+        # ⚡ ULTRA-FAST: Timer-based updates for true real-time performance
+        self.stroke_update_timer = QTimer(self)
+        self.stroke_update_timer.setSingleShot(True)
+        self.stroke_update_timer.timeout.connect(self._update_display_with_overlay)
+        self.stroke_update_timer.setInterval(4)  # ~250 FPS updates for maximum responsiveness
         self.drawn_lines = []  # List of x positions for vertical lines
         self.drawn_horizontal_lines = []  # List of y positions for horizontal lines
         self.drawn_free_lines = []  # List of free lines, each with start and end points
+        self.drawn_free_strokes = []  # NEW: List of free draw strokes (continuous paths)
         self.current_line_start = None  # Store first click point for free line
+        self.current_stroke = None  # NEW: Current stroke being drawn
+        self.is_drawing = False  # NEW: Track if currently drawing a stroke
         self.lines_visible = True  # New: Toggle line visibility
-        self.line_thickness = 1
-        self.line_color = QColor("#242424")  # Default white color for lines
-
+        self.image_visible = True  # New: Toggle image visibility
+        self.line_thickness = 1  # Mfffake lines thicker for better visibility
+        self.line_color = QColor("#FFFFFF")
         # Always on top functionality
         self.always_on_top = False
 
@@ -2211,6 +2369,8 @@ class RandomImageViewer(QMainWindow):
         add_spacer(4)
         self.free_line_tool_btn = QToolButton(); self.free_line_tool_btn.setText("╱"); self.free_line_tool_btn.setToolTip("Draw Free Lines (2 clicks per line)"); self.free_line_tool_btn.setCheckable(True); self.free_line_tool_btn.setFixedSize(24,24); self.free_line_tool_btn.toggled.connect(self.toggle_free_line_drawing); toolbar.addWidget(self.free_line_tool_btn)
         add_spacer(4)
+        self.free_draw_tool_btn = QToolButton(); self.free_draw_tool_btn.setText("✏"); self.free_draw_tool_btn.setToolTip("Free Draw Tool (drag to draw)"); self.free_draw_tool_btn.setCheckable(True); self.free_draw_tool_btn.setFixedSize(24,24); self.free_draw_tool_btn.toggled.connect(self.toggle_free_draw); toolbar.addWidget(self.free_draw_tool_btn)
+        add_spacer(4)
         self.undo_line_btn = QToolButton(); self.undo_line_btn.setText("↶"); self.undo_line_btn.setToolTip("Undo Last Line"); self.undo_line_btn.setFixedSize(24,24); self.undo_line_btn.clicked.connect(self.undo_last_line); toolbar.addWidget(self.undo_line_btn)
         add_spacer(4)
         self.line_thickness_spin = QSpinBox(); self.line_thickness_spin.setRange(1,10); self.line_thickness_spin.setValue(self.line_thickness); self.line_thickness_spin.setSuffix("px"); self.line_thickness_spin.setFixedHeight(24); self.line_thickness_spin.setFixedWidth(50); self.line_thickness_spin.setToolTip("Line Thickness"); self.line_thickness_spin.valueChanged.connect(self.update_line_thickness); toolbar.addWidget(self.line_thickness_spin)
@@ -2222,6 +2382,8 @@ class RandomImageViewer(QMainWindow):
         clear_lines_btn = QToolButton(); clear_lines_btn.setText("🗑"); clear_lines_btn.setToolTip("Clear All Lines"); clear_lines_btn.setFixedSize(24,24); clear_lines_btn.clicked.connect(self.clear_lines); toolbar.addWidget(clear_lines_btn)
         add_spacer(4)
         self.toggle_lines_btn = QToolButton(); self.toggle_lines_btn.setText("👁"); self.toggle_lines_btn.setToolTip("Toggle Line Visibility On/Off"); self.toggle_lines_btn.setCheckable(True); self.toggle_lines_btn.setChecked(True); self.toggle_lines_btn.setFixedSize(24,24); self.toggle_lines_btn.toggled.connect(self.toggle_line_visibility); toolbar.addWidget(self.toggle_lines_btn)
+        add_spacer(4)
+        self.toggle_image_btn = QToolButton(); self.toggle_image_btn.setText("🖼"); self.toggle_image_btn.setToolTip("Toggle Image Visibility (keep lines visible)"); self.toggle_image_btn.setCheckable(True); self.toggle_image_btn.setChecked(True); self.toggle_image_btn.setFixedSize(24,24); self.toggle_image_btn.toggled.connect(self.toggle_image_visibility); toolbar.addWidget(self.toggle_image_btn)
         add_spacer(8)
         # Enhancement toggles
         self.grayscale_toggle_btn = QToolButton(); self.grayscale_toggle_btn.setText("🌑"); self.grayscale_toggle_btn.setToolTip("Toggle Grayscale On/Off"); self.grayscale_toggle_btn.setCheckable(True); self.grayscale_toggle_btn.setFixedSize(24,24); self.grayscale_toggle_btn.toggled.connect(self.toggle_grayscale); toolbar.addWidget(self.grayscale_toggle_btn)
@@ -2680,6 +2842,7 @@ class RandomImageViewer(QMainWindow):
             self.drawn_lines.clear()
             self.drawn_horizontal_lines.clear()
             self.drawn_free_lines.clear()
+            self.drawn_free_strokes.clear()  # Clear free draw strokes
             self.current_line_start = None
             # Reset rotation angle and flips for new image
             self.rotation_angle = 0
@@ -2744,12 +2907,13 @@ class RandomImageViewer(QMainWindow):
         
         # Create cache key including enhancement settings, rotation, flips, and line information
         lines_info = ""
-        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
             # Include line count and visibility in cache key since LUT processing differs with/without lines
             vlines = len(self.drawn_lines) if self.drawn_lines else 0
             hlines = len(self.drawn_horizontal_lines) if self.drawn_horizontal_lines else 0
             flines = len(self.drawn_free_lines) if self.drawn_free_lines else 0
-            lines_info = f"_lines_{vlines}_{hlines}_{flines}_{self.line_color.name()}_{self.line_thickness}"
+            strokes = len(self.drawn_free_strokes) if self.drawn_free_strokes else 0
+            lines_info = f"_lines_{vlines}_{hlines}_{flines}_{strokes}_{self.line_color.name()}_{self.line_thickness}"
         
         cache_key = f"{img_path}_{self.grayscale_value}_{self.contrast_value}_{self.gamma_value}_{self.rotation_angle}_{self.flipped_h}_{self.flipped_v}_{self.current_lut_name}_{self.lut_strength}{lines_info}"
         
@@ -2821,7 +2985,8 @@ class RandomImageViewer(QMainWindow):
         scaled_pixmap = self._scale_pixmap(pixmap, img_path)
         
         # Draw lines on the scaled pixmap if any exist AND lines are visible
-        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+            print(f"DEBUG: Rendering lines - strokes: {len(self.drawn_free_strokes) if self.drawn_free_strokes else 0}")
             final_pixmap = scaled_pixmap.copy()
             painter = QPainter(final_pixmap)
             painter.setRenderHint(QPainter.Antialiasing, False)
@@ -2976,6 +3141,47 @@ class RandomImageViewer(QMainWindow):
                         painter.setRenderHint(QPainter.Antialiasing, True)
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         painter.setRenderHint(QPainter.Antialiasing, False)
+                
+                # Draw free draw strokes (adjusted for flips and rotation)
+                for stroke in self.drawn_free_strokes:
+                    if len(stroke) < 2:
+                        continue  # Need at least 2 points to draw
+                    
+                    # Convert stroke points with same transformation as free lines
+                    for i in range(len(stroke) - 1):
+                        start_x, start_y = stroke[i]
+                        end_x, end_y = stroke[i + 1]
+                        
+                        # Apply flips first (same as free lines)
+                        flip_start_x = original_size.width() - start_x if self.flipped_h else start_x
+                        flip_start_y = original_size.height() - start_y if self.flipped_v else start_y
+                        flip_end_x = original_size.width() - end_x if self.flipped_h else end_x
+                        flip_end_y = original_size.height() - end_y if self.flipped_v else end_y
+                        
+                        # Apply rotation transformation
+                        if self.rotation_angle == 90:
+                            display_start_x = int(flip_start_y * scale_x) + draw_x
+                            display_start_y = int((original_size.width() - flip_start_x) * scale_y) + draw_y
+                            display_end_x = int(flip_end_y * scale_x) + draw_x
+                            display_end_y = int((original_size.width() - flip_end_x) * scale_y) + draw_y
+                        elif self.rotation_angle == 180:
+                            display_start_x = int((original_size.width() - flip_start_x) * scale_x) + draw_x
+                            display_start_y = int((original_size.height() - flip_start_y) * scale_y) + draw_y
+                            display_end_x = int((original_size.width() - flip_end_x) * scale_x) + draw_x
+                            display_end_y = int((original_size.height() - flip_end_y) * scale_y) + draw_y
+                        elif self.rotation_angle == 270:
+                            display_start_x = int(flip_start_y * scale_x) + draw_x
+                            display_start_y = int((original_size.height() - flip_start_x) * scale_y) + draw_y
+                            display_end_x = int(flip_end_y * scale_x) + draw_x
+                            display_end_y = int((original_size.height() - flip_end_x) * scale_y) + draw_y
+                        else:
+                            display_start_x = int(flip_start_x * scale_x) + draw_x
+                            display_start_y = int(flip_start_y * scale_y) + draw_y
+                            display_end_x = int(flip_end_x * scale_x) + draw_x
+                            display_end_y = int(flip_end_y * scale_y) + draw_y
+                        
+                        # Draw the line segment
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
             else:
                 # No rotation - original line drawing logic
                 # Draw vertical lines
@@ -3016,9 +3222,102 @@ class RandomImageViewer(QMainWindow):
                     if (max_x >= -tolerance and min_x <= final_pixmap.width() + tolerance and
                         max_y >= -tolerance and min_y <= final_pixmap.height() + tolerance):
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                
+                # Draw free draw strokes (continuous paths)
+                print(f"DEBUG: Rendering free draw strokes - found {len(self.drawn_free_strokes)} strokes")
+                for stroke_idx, stroke in enumerate(self.drawn_free_strokes):
+                    if len(stroke) < 2:
+                        continue  # Need at least 2 points to draw
+                    
+                    print(f"DEBUG: Rendering stroke {stroke_idx} with {len(stroke)} points")
+                    
+                    # Convert stroke points to display coordinates
+                    for i in range(len(stroke) - 1):
+                        start_x, start_y = stroke[i]
+                        end_x, end_y = stroke[i + 1]
+                        
+                        # Use same coordinate transformation as free lines
+                        display_start_x = int(start_x * scale_x) + draw_x
+                        display_start_y = int(start_y * scale_y) + draw_y
+                        display_end_x = int(end_x * scale_x) + draw_x
+                        display_end_y = int(end_y * scale_y) + draw_y
+                        
+                        # Draw the line segment
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        
+                        if i < 3:  # Debug first few segments
+                            print(f"DEBUG: Drawing segment {i}: ({display_start_x},{display_start_y}) to ({display_end_x},{display_end_y})")
             
             painter.end()
             scaled_pixmap = final_pixmap
+        
+        # Handle image visibility toggle
+        if not self.image_visible:
+            # Create a blank pixmap with the same size but keep lines visible
+            blank_pixmap = QPixmap(scaled_pixmap.size())
+            blank_pixmap.fill(Qt.black)  # Fill with black background
+            
+            # If there are lines, draw them on the blank pixmap
+            if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                painter = QPainter(blank_pixmap)
+                painter.setRenderHint(QPainter.Antialiasing, False)
+                painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                
+                # Use the same coordinate transformations as above
+                original_size = self.original_pixmap.size()
+                label_size = self.image_label.size()
+                zoom_factor = self.image_label.zoom_factor
+                
+                base_scaled = self.original_pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                zoomed_width = int(base_scaled.width() * zoom_factor)
+                zoomed_height = int(base_scaled.height() * zoom_factor)
+                
+                draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+                draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+                
+                scale_x = zoomed_width / original_size.width()
+                scale_y = zoomed_height / original_size.height()
+                
+                # Draw vertical lines
+                for x in self.drawn_lines:
+                    display_x = int(x * scale_x) + draw_x
+                    if 0 <= display_x < blank_pixmap.width():
+                        painter.drawLine(display_x, 0, display_x, blank_pixmap.height())
+                
+                # Draw horizontal lines
+                for y in self.drawn_horizontal_lines:
+                    display_y = int(y * scale_y) + draw_y
+                    if 0 <= display_y < blank_pixmap.height():
+                        painter.drawLine(0, display_y, blank_pixmap.width(), display_y)
+                
+                # Draw free lines
+                for line in self.drawn_free_lines:
+                    start_x, start_y = line['start']
+                    end_x, end_y = line['end']
+                    display_start_x = int(start_x * scale_x) + draw_x
+                    display_start_y = int(start_y * scale_y) + draw_y
+                    display_end_x = int(end_x * scale_x) + draw_x
+                    display_end_y = int(end_y * scale_y) + draw_y
+                    painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                
+                # Draw free strokes
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                for stroke in self.drawn_free_strokes:
+                    if len(stroke) < 2:
+                        continue
+                    for i in range(len(stroke) - 1):
+                        start_x, start_y = stroke[i]
+                        end_x, end_y = stroke[i + 1]
+                        display_start_x = int(start_x * scale_x) + draw_x
+                        display_start_y = int(start_y * scale_y) + draw_y
+                        display_end_x = int(end_x * scale_x) + draw_x
+                        display_end_y = int(end_y * scale_y) + draw_y
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                painter.setRenderHint(QPainter.Antialiasing, False)
+                
+                painter.end()
+            
+            scaled_pixmap = blank_pixmap
         
         # Display the final scaled pixmap
         self.image_label.setPixmap(scaled_pixmap)
@@ -4152,8 +4451,11 @@ class RandomImageViewer(QMainWindow):
             self.main_toolbar.hide()
             self.slider_toolbar.hide()
             
-            # Remove window decorations (borderless window) 
-            self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+            # Remove window decorations (borderless window) while preserving always on top
+            window_flags = Qt.Window | Qt.FramelessWindowHint
+            if self.always_on_top:
+                window_flags |= Qt.WindowStaysOnTopHint
+            self.setWindowFlags(window_flags)
             self.show()  # Need to call show() after changing window flags
             
             # Show temporary message before hiding status bar
@@ -4190,16 +4492,42 @@ class RandomImageViewer(QMainWindow):
             # Disable other line modes when this one is activated
             self.line_drawing_mode = False
             self.horizontal_line_drawing_mode = False
+            self.free_draw_mode = False
             self.line_tool_btn.setChecked(False)
             self.hline_tool_btn.setChecked(False)
+            if hasattr(self, 'free_draw_tool_btn'):
+                self.free_draw_tool_btn.setChecked(False)
         if not checked:
             # Reset current line start when mode is deactivated
             self.current_line_start = None
         self._update_cursor_and_status()
 
+    def toggle_free_draw(self, checked):
+        """Toggle free draw mode (continuous drawing)"""
+        print(f"DEBUG: Free draw mode toggled: {checked}")
+        self.free_draw_mode = checked
+        if checked:
+            # Disable other line modes when this one is activated
+            self.line_drawing_mode = False
+            self.horizontal_line_drawing_mode = False
+            self.free_line_drawing_mode = False
+            self.line_tool_btn.setChecked(False)
+            self.hline_tool_btn.setChecked(False)
+            self.free_line_tool_btn.setChecked(False)
+            print(f"DEBUG: Free draw mode activated, other modes disabled")
+        if not checked:
+            # Reset drawing state when mode is deactivated
+            self.current_stroke = None
+            self.is_drawing = False
+            print(f"DEBUG: Free draw mode deactivated")
+        self._update_cursor_and_status()
+
     def _update_cursor_and_status(self):
         """Update cursor and status message based on active drawing modes"""
-        if self.free_line_drawing_mode:
+        if self.free_draw_mode:
+            self.image_label.setCursor(Qt.CrossCursor)
+            self.status.showMessage("Free draw mode - Drag mouse to draw continuous lines")
+        elif self.free_line_drawing_mode:
             self.image_label.setCursor(Qt.CrossCursor)
             if self.current_line_start is None:
                 self.status.showMessage("Free line drawing mode - Click first point to start line")
@@ -4226,7 +4554,7 @@ class RandomImageViewer(QMainWindow):
         # Clear enhancement cache to force full redraw with new thickness
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
-        if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+        if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
             # Force full display_image to ensure changes are visible
             self.display_image(self.current_image)
 
@@ -4244,7 +4572,7 @@ class RandomImageViewer(QMainWindow):
             self.enhancement_cache.clear()
             self.scaled_cache.clear()
             # Redraw current image with new color if there are lines
-            if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+            if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                 # Force full display_image to ensure changes are visible
                 self.display_image(self.current_image)
 
@@ -4260,7 +4588,7 @@ class RandomImageViewer(QMainWindow):
         self.enhancement_cache.clear()
         self.scaled_cache.clear()
         # Redraw current image with new color if there are lines
-        if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+        if self.current_image and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
             # Force full display_image to ensure changes are visible
             self.display_image(self.current_image)
 
@@ -4325,11 +4653,277 @@ class RandomImageViewer(QMainWindow):
             
             self.status.showMessage(f"Line drawn from ({start_x:.0f}, {start_y:.0f}) to ({end_x:.0f}, {end_y:.0f})")
 
+    def start_free_draw_stroke(self, x, y):
+        """⚡ PERFORMANCE: Start a new free draw stroke with aggressive caching"""
+        print(f"DEBUG: Starting optimized free draw stroke at ({x:.1f}, {y:.1f})")
+        
+        # Initialize stroke data
+        self.current_stroke = [(x, y)]
+        self.is_drawing_free_stroke = True
+        
+        # ⚡ AGGRESSIVE CACHING: Pre-calculate all coordinate conversion data
+        try:
+            # Get current display state once and cache it
+            label = self.image_label
+            if not label or not label.pixmap() or label.pixmap().isNull():
+                return
+                
+            # Cache display parameters for ultra-fast coordinate conversion
+            self.drawing_cache = {
+                'label_size': label.size(),
+                'zoom_factor': label.zoom_factor,
+                'pan_offset_x': label.pan_offset_x,
+                'pan_offset_y': label.pan_offset_y,
+                'rotation': self.rotation_angle,
+                'flipped_h': self.flipped_h,
+                'flipped_v': self.flipped_v
+            }
+            
+            # Load original image dimensions once
+            original_pixmap, error = safe_load_pixmap(self.current_image)
+            if error or original_pixmap.isNull():
+                return
+            self.drawing_cache['original_size'] = original_pixmap.size()
+            
+            # Pre-calculate display transformation matrices
+            rotation = self.drawing_cache['rotation']
+            original_size = self.drawing_cache['original_size']
+            
+            if rotation == 90 or rotation == 270:
+                display_reference_size = QSize(original_size.height(), original_size.width())
+            else:
+                display_reference_size = original_size
+            
+            label_size = self.drawing_cache['label_size']
+            base_scaled = display_reference_size.scaled(label_size, Qt.KeepAspectRatio)
+            
+            zoom_factor = self.drawing_cache['zoom_factor']
+            zoomed_width = int(base_scaled.width() * zoom_factor)
+            zoomed_height = int(base_scaled.height() * zoom_factor)
+            
+            draw_x = (label_size.width() - zoomed_width) // 2 + int(self.drawing_cache['pan_offset_x'])
+            draw_y = (label_size.height() - zoomed_height) // 2 + int(self.drawing_cache['pan_offset_y'])
+            
+            # Cache all transformation parameters
+            self.drawing_cache.update({
+                'display_reference_size': display_reference_size,
+                'zoomed_width': zoomed_width,
+                'zoomed_height': zoomed_height,
+                'draw_x': draw_x,
+                'draw_y': draw_y
+            })
+            
+            # ⚡ DIRECT-TO-SCREEN: Create temporary overlay for real-time drawing
+            current_pixmap = label.pixmap()
+            self.temp_stroke_overlay = QPixmap(current_pixmap.size())
+            self.temp_stroke_overlay.fill(Qt.transparent)
+            
+            # ⚡ PRE-ALLOCATE: Create QImage for direct pixel access
+            self._stroke_image = QImage(current_pixmap.size(), QImage.Format.Format_ARGB32)
+            self._stroke_image.fill(Qt.transparent)
+            
+            # Initialize last point for incremental drawing
+            self.last_draw_point = None
+            
+            print(f"DEBUG: Optimized drawing cache initialized - ready for true real-time performance")
+            self.status.showMessage("Ultra-fast real-time free drawing active")
+            
+        except Exception as e:
+            print(f"DEBUG: Error initializing drawing cache: {e}")
+            self.is_drawing_free_stroke = False
+
+    def add_free_draw_point(self, x, y):
+        """⚡ INCREMENTAL PAINTING: Add point with ultra-fast incremental drawing"""
+        if not self.is_drawing_free_stroke or not self.drawing_cache:
+            return
+            
+        # Add to stroke data
+        self.current_stroke.append((x, y))
+        
+        # ⚡ ULTRA-FAST coordinate conversion using cached data
+        cache = self.drawing_cache
+        label_size = cache['label_size']
+        zoom_factor = cache['zoom_factor']
+        
+        # Convert to screen coordinates using cached parameters
+        rotation = cache['rotation']
+        original_size = cache['original_size']
+        
+        if rotation == 90 or rotation == 270:
+            scale_x = cache['zoomed_width'] / original_size.height()
+            scale_y = cache['zoomed_height'] / original_size.width()
+        else:
+            scale_x = cache['zoomed_width'] / original_size.width()
+            scale_y = cache['zoomed_height'] / original_size.height()
+        
+        # Apply transformations using cached data
+        display_x = x * scale_x
+        display_y = y * scale_y
+        
+        # Apply rotation (reverse transformation)
+        if rotation == 90:
+            screen_x = original_size.width() * scale_x - display_y
+            screen_y = display_x
+        elif rotation == 180:
+            screen_x = original_size.width() * scale_x - display_x
+            screen_y = original_size.height() * scale_y - display_y
+        elif rotation == 270:
+            screen_x = display_y
+            screen_y = original_size.height() * scale_y - display_x
+        else:  # 0 degrees
+            screen_x = display_x
+            screen_y = display_y
+        
+        # Apply flips
+        if cache['flipped_h']:
+            screen_x = cache['zoomed_width'] - screen_x
+        if cache['flipped_v']:
+            screen_y = cache['zoomed_height'] - screen_y
+        
+        # Final screen position
+        final_x = screen_x + cache['draw_x']
+        final_y = screen_y + cache['draw_y']
+        
+        # ⚡ INCREMENTAL PAINTING: Only paint the new segment
+        if self.last_draw_point is not None:
+            self._paint_stroke_segment_realtime(self.last_draw_point, (final_x, final_y))
+        else:
+            # First point - paint a small dot
+            self._paint_stroke_segment_realtime((final_x, final_y), (final_x, final_y))
+        
+        self.last_draw_point = (final_x, final_y)
+
+    def _paint_stroke_segment_realtime(self, start_point, end_point):
+        """⚡ ULTRA-FAST: Direct pixel manipulation for true real-time performance"""
+        if not self.temp_stroke_overlay:
+            return
+            
+        # ⚡ DIRECT PIXEL ACCESS: Use QImage for lightning-fast pixel manipulation
+        if not hasattr(self, '_stroke_image'):
+            # Convert pixmap to image once for direct pixel access
+            self._stroke_image = self.temp_stroke_overlay.toImage()
+            
+        image = self._stroke_image
+        
+        # ⚡ ULTRA-FAST: Bresenham's algorithm for direct pixel access
+        x0, y0 = int(start_point[0]), int(start_point[1])
+        x1, y1 = int(end_point[0]), int(end_point[1])
+        
+        # Handle single point (dot) - ultra-fast
+        if x0 == x1 and y0 == y1:
+            if 0 <= x0 < image.width() and 0 <= y0 < image.height():
+                image.setPixel(x0, y0, 0xFFFFFFFF)  # Pre-calculated white RGBA
+            return
+            
+        # ⚡ OPTIMIZED BRESENHAM: Integer-only arithmetic for maximum speed
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+        
+        # Pre-calculate bounds check to avoid repeated calculations
+        width = image.width()
+        height = image.height()
+        white_pixel = 0xFFFFFFFF  # Pre-calculated white RGBA value
+        
+        while True:
+            # ⚡ BOUNDS CHECK + PIXEL SET: Combined for maximum performance
+            if 0 <= x0 < width and 0 <= y0 < height:
+                image.setPixel(x0, y0, white_pixel)
+                
+            if x0 == x1 and y0 == y1:
+                break
+                
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x0 += sx
+            if e2 < dx:
+                err += dx
+                y0 += sy
+        
+        # ⚡ TIMER-BASED UPDATE: Schedule display update instead of immediate update
+        # This prevents overwhelming the event loop and provides true real-time performance
+        if self.stroke_update_timer.isActive():
+            self.stroke_update_timer.stop()
+        self.stroke_update_timer.start()
+
+    def _update_display_with_overlay(self):
+        """⚡ TIMER-BASED: Update display only when timer fires for optimal performance"""
+        if not hasattr(self, '_stroke_image') or not self.temp_stroke_overlay:
+            return
+            
+        # Convert back to pixmap for display
+        self.temp_stroke_overlay = QPixmap.fromImage(self._stroke_image)
+            
+        label = self.image_label
+        if not label or not label.pixmap():
+            return
+        
+        # ⚡ PRE-ALLOCATED COMPOSITE: Reuse composite buffer to avoid allocation overhead
+        if not hasattr(self, '_composite_buffer'):
+            base_pixmap = label.pixmap()
+            self._composite_buffer = QPixmap(base_pixmap.size())
+            
+        base_pixmap = label.pixmap()
+        
+        # ⚡ FAST COMPOSITE: Direct painter operations without transparency fill
+        painter = QPainter(self._composite_buffer)
+        painter.drawPixmap(0, 0, base_pixmap)
+        painter.drawPixmap(0, 0, self.temp_stroke_overlay)
+        painter.end()
+        
+        # ⚡ INSTANT DISPLAY: Set pixmap directly
+        label.setPixmap(self._composite_buffer)
+
+    def end_free_draw_stroke(self):
+        """⚡ OPTIMIZED FINALIZATION: Clean finalization with single redraw"""
+        print(f"DEBUG: Ending optimized free draw stroke")
+        
+        if self.current_stroke is not None and len(self.current_stroke) > 1:
+            # Add completed stroke to the permanent list
+            self.drawn_free_strokes.append(self.current_stroke.copy())
+            print(f"DEBUG: Stroke completed with {len(self.current_stroke)} points, total strokes: {len(self.drawn_free_strokes)}")
+            
+            # ⚡ CLEAN FINALIZATION: Clear caches and perform single clean redraw
+            if hasattr(self, '_lut_process_cache'):
+                self._lut_process_cache.clear()
+            if hasattr(self, 'enhancement_cache'):
+                self.enhancement_cache.clear()
+            if hasattr(self, 'scaled_cache'):
+                self.scaled_cache.clear()
+            
+            self.status.showMessage(f"Stroke finalized ({len(self.current_stroke)} points)")
+        else:
+            print(f"DEBUG: Stroke too short or invalid: {self.current_stroke}")
+        
+        # ⚡ CLEANUP: Reset all performance optimization state
+        self.current_stroke = None
+        self.is_drawing_free_stroke = False
+        self.drawing_cache = None
+        self.temp_stroke_overlay = None
+        self.last_draw_point = None
+        
+        # ⚡ CLEANUP: Reset ultra-fast drawing buffers
+        if hasattr(self, '_stroke_image'):
+            delattr(self, '_stroke_image')
+        if hasattr(self, '_composite_buffer'):
+            delattr(self, '_composite_buffer')
+        
+        # ⚡ SINGLE FINAL REDRAW: "Bake" the stroke into the image with full processing
+        if self.current_image:
+            print(f"DEBUG: Performing final optimized redraw")
+            self.display_image(self.current_image)
+
     def clear_lines(self):
         self.drawn_lines.clear()
         self.drawn_horizontal_lines.clear()
         self.drawn_free_lines.clear()
+        self.drawn_free_strokes.clear()  # NEW: Clear free draw strokes
         self.current_line_start = None
+        self.current_stroke = None  # NEW: Clear current stroke
+        self.is_drawing = False  # NEW: Reset drawing state
         # Clear LUT cache since lines changed
         if hasattr(self, '_lut_process_cache'):
             self._lut_process_cache.clear()
@@ -4341,11 +4935,15 @@ class RandomImageViewer(QMainWindow):
             self.display_image(self.current_image)
 
     def undo_last_line(self):
-        """Remove the most recently added line (vertical, horizontal, or free line)"""
+        """Remove the most recently added line (vertical, horizontal, free line, or free draw stroke)"""
         removed_something = False
         
-        # Prioritize free lines, then horizontal, then vertical
-        if self.drawn_free_lines:
+        # Prioritize free draw strokes, then free lines, then horizontal, then vertical
+        if self.drawn_free_strokes:
+            # Remove the last free draw stroke
+            self.drawn_free_strokes.pop()
+            removed_something = True
+        elif self.drawn_free_lines:
             # Remove the last free line
             self.drawn_free_lines.pop()
             removed_something = True
@@ -4679,6 +5277,32 @@ class RandomImageViewer(QMainWindow):
             import traceback
             traceback.print_exc()
 
+    def toggle_image_visibility(self, checked):
+        """Toggle image visibility while keeping lines visible"""
+        try:
+            self.image_visible = checked
+            
+            # Update button state
+            if hasattr(self, 'toggle_image_btn'):
+                self.toggle_image_btn.blockSignals(True)
+                self.toggle_image_btn.setChecked(checked)
+                self.toggle_image_btn.blockSignals(False)
+            
+            # Force immediate update
+            if self.current_image:
+                self.display_image(self.current_image)
+                
+            # Update status
+            if checked:
+                self.status.showMessage("Image visible")
+            else:
+                self.status.showMessage("Image hidden - lines only")
+                
+        except Exception as e:
+            print(f"Error in toggle_image_visibility: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _update_enhancement_menu_states(self):
         """Update the checked state of enhancement menu actions"""
         if hasattr(self, 'grayscale_menu_action'):
@@ -5003,7 +5627,7 @@ class RandomImageViewer(QMainWindow):
             
             # ENHANCED PREVIEW SIZING: When lines are present, maintain higher quality
             has_lines = (self.lines_visible and 
-                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes))
             
             display_width = self.image_label.width()
             display_height = self.image_label.height()
@@ -5101,7 +5725,7 @@ class RandomImageViewer(QMainWindow):
             # Scale to display size and show immediately
             final_preview = self._scale_pixmap(fast_preview, self.current_image)
             # Apply lines after LUT preview scaling if they should be visible
-            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)):
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes)):
                 # Temporarily set pixmap then fast overlay
                 self.image_label.setPixmap(final_preview)
                 if hasattr(self, '_fast_line_update'):
@@ -5179,7 +5803,7 @@ class RandomImageViewer(QMainWindow):
             
             # IMPORTANT: Use GPU processing even when lines are present
             has_lines = (self.lines_visible and 
-                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes))
             
             # If lines are present, FORCE GPU processing for better performance (no freezing)
             if has_lines:
@@ -5287,7 +5911,7 @@ class RandomImageViewer(QMainWindow):
             
             # Check if lines are present for more frequent yield points
             has_lines = (self.lines_visible and 
-                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes))
             pixels_processed = 0
             yield_frequency = 2000 if has_lines else 5000  # More frequent yields with lines
             
@@ -5423,14 +6047,14 @@ class RandomImageViewer(QMainWindow):
             if (self.grayscale_value != 0 or self.contrast_value != 50 or self.gamma_value != 0):
                 processed_pixmap = self.apply_fast_enhancements(processed_pixmap)
             
-            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)):
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes)):
                 processed_pixmap = self._add_lines_to_pixmap(processed_pixmap)
             
             # Scale, display and cache immediately - NO DELAYS
             final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
             self.image_label.setPixmap(final_pixmap)
             # Reapply lines post-scale to avoid being lost by scaling
-            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)) and hasattr(self, '_fast_line_update'):
+            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes)) and hasattr(self, '_fast_line_update'):
                 self._fast_line_update()
             
             # Update cache with complete processed image
@@ -5467,7 +6091,7 @@ class RandomImageViewer(QMainWindow):
         if not pixmap or pixmap.isNull():
             return pixmap
             
-        if not (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+        if not (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
             return pixmap
             
         try:
@@ -5574,6 +6198,9 @@ class RandomImageViewer(QMainWindow):
 
     def _display_image_with_lut_preview(self, img_path):
         """Display image with smart LUT preview handling to prevent freezing"""
+        # Clear all drawn lines when switching images
+        self.clear_lines()
+        
         if self.current_lut and self.lut_strength > 0:
             # If LUT is active, use instant preview system
             self.current_image = img_path  # Set this first
@@ -5607,7 +6234,7 @@ class RandomImageViewer(QMainWindow):
             
             # ENHANCED PREVIEW: Better quality when lines are present
             has_lines = (self.lines_visible and 
-                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines))
+                        (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes))
             
             if has_lines:
                 # Higher quality preview when lines are present
@@ -5873,10 +6500,6 @@ class RandomImageViewer(QMainWindow):
             self.image_label.zoom_factor = new_zoom
             if self.current_image:
                 self._smart_zoom_display()
-                # Reapply lines quickly after zoom
-                if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
-                    and hasattr(self, '_fast_line_update')):
-                    self._fast_line_update()
             
             # Update status with processing awareness
             if (self.lut_enabled and hasattr(self, '_async_processing_state') and 
@@ -5896,9 +6519,6 @@ class RandomImageViewer(QMainWindow):
             self.image_label.zoom_factor = new_zoom
             if self.current_image:
                 self._smart_zoom_display()
-                if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
-                    and hasattr(self, '_fast_line_update')):
-                    self._fast_line_update()
             
             # Update status with processing awareness
             if (self.lut_enabled and hasattr(self, '_async_processing_state') and 
@@ -5934,11 +6554,147 @@ class RandomImageViewer(QMainWindow):
                 
                 # Scale and display - FAST operation, no GPU processing
                 final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
+                
+                # Draw lines directly on the scaled pixmap if any exist
+                if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                    painter = QPainter(final_pixmap)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                    
+                    # Get transformation parameters
+                    original_size = processed_pixmap.size()
+                    label_size = self.image_label.size()
+                    zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                    
+                    # Calculate scaling factors
+                    if self.rotation_angle == 90 or self.rotation_angle == 270:
+                        display_ref = QSize(original_size.height(), original_size.width())
+                    else:
+                        display_ref = original_size
+                        
+                    base_scaled = display_ref.scaled(label_size, Qt.KeepAspectRatio)
+                    zoomed_width = int(base_scaled.width() * zoom_factor)
+                    zoomed_height = int(base_scaled.height() * zoom_factor)
+                    
+                    draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+                    draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+                    
+                    scale_x = zoomed_width / original_size.width()
+                    scale_y = zoomed_height / original_size.height()
+                    
+                    # Draw vertical lines
+                    for x in self.drawn_lines:
+                        display_x = int(x * scale_x) + draw_x
+                        if 0 <= display_x < final_pixmap.width():
+                            painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                    
+                    # Draw horizontal lines
+                    for y in self.drawn_horizontal_lines:
+                        display_y = int(y * scale_y) + draw_y
+                        if 0 <= display_y < final_pixmap.height():
+                            painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                    
+                    # Draw free lines
+                    for line in self.drawn_free_lines:
+                        start_x, start_y = line['start']
+                        end_x, end_y = line['end']
+                        display_start_x = int(start_x * scale_x) + draw_x
+                        display_start_y = int(start_y * scale_y) + draw_y
+                        display_end_x = int(end_x * scale_x) + draw_x
+                        display_end_y = int(end_y * scale_y) + draw_y
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    
+                    # Draw free strokes
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    for stroke in self.drawn_free_strokes:
+                        if len(stroke) < 2:
+                            continue
+                        for i in range(len(stroke) - 1):
+                            start_x, start_y = stroke[i]
+                            end_x, end_y = stroke[i + 1]
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    
+                    painter.end()
+                
+                # Handle image visibility toggle
+                if not self.image_visible:
+                    # Create a blank pixmap with the same size but keep lines visible
+                    blank_pixmap = QPixmap(final_pixmap.size())
+                    blank_pixmap.fill(Qt.black)  # Fill with black background
+                    
+                    # If there are lines, copy them from final_pixmap to blank_pixmap
+                    if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                        painter = QPainter(blank_pixmap)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        
+                        # Use the same coordinate transformations as above
+                        original_size = processed_pixmap.size()
+                        label_size = self.image_label.size()
+                        zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                        
+                        if self.rotation_angle == 90 or self.rotation_angle == 270:
+                            display_ref = QSize(original_size.height(), original_size.width())
+                        else:
+                            display_ref = original_size
+                            
+                        base_scaled = display_ref.scaled(label_size, Qt.KeepAspectRatio)
+                        zoomed_width = int(base_scaled.width() * zoom_factor)
+                        zoomed_height = int(base_scaled.height() * zoom_factor)
+                        
+                        draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+                        draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+                        
+                        scale_x = zoomed_width / original_size.width()
+                        scale_y = zoomed_height / original_size.height()
+                        
+                        # Draw vertical lines
+                        for x in self.drawn_lines:
+                            display_x = int(x * scale_x) + draw_x
+                            if 0 <= display_x < blank_pixmap.width():
+                                painter.drawLine(display_x, 0, display_x, blank_pixmap.height())
+                        
+                        # Draw horizontal lines
+                        for y in self.drawn_horizontal_lines:
+                            display_y = int(y * scale_y) + draw_y
+                            if 0 <= display_y < blank_pixmap.height():
+                                painter.drawLine(0, display_y, blank_pixmap.width(), display_y)
+                        
+                        # Draw free lines
+                        for line in self.drawn_free_lines:
+                            start_x, start_y = line['start']
+                            end_x, end_y = line['end']
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        
+                        # Draw free strokes
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                display_start_x = int(start_x * scale_x) + draw_x
+                                display_start_y = int(start_y * scale_y) + draw_y
+                                display_end_x = int(end_x * scale_x) + draw_x
+                                display_end_y = int(end_y * scale_y) + draw_y
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        
+                        painter.end()
+                    
+                    final_pixmap = blank_pixmap
+                
                 self.image_label.setPixmap(final_pixmap)
-                # Reapply lines if present
-                if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
-                    and hasattr(self, '_fast_line_update')):
-                    self._fast_line_update()
                 
                 # Show zoom status
                 zoom = getattr(self.image_label, 'zoom_factor', 1.0)
@@ -5961,12 +6717,149 @@ class RandomImageViewer(QMainWindow):
                     else:
                         processed_pixmap = cached_pixmap
                     
-                    # Scale and display
+                    # Scale and display with lines
                     final_pixmap = self._scale_pixmap(processed_pixmap, self.current_image)
+                    
+                    # Draw lines directly on the scaled pixmap if any exist
+                    if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                        painter = QPainter(final_pixmap)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        
+                        # Get transformation parameters
+                        original_size = processed_pixmap.size()
+                        label_size = self.image_label.size()
+                        zoom_factor = self.image_label.zoom_factor
+                        
+                        # Calculate scaling factors
+                        if self.rotation_angle == 90 or self.rotation_angle == 270:
+                            display_ref = QSize(original_size.height(), original_size.width())
+                        else:
+                            display_ref = original_size
+                            
+                        base_scaled = display_ref.scaled(label_size, Qt.KeepAspectRatio)
+                        zoomed_width = int(base_scaled.width() * zoom_factor)
+                        zoomed_height = int(base_scaled.height() * zoom_factor)
+                        
+                        draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+                        draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+                        
+                        scale_x = zoomed_width / original_size.width()
+                        scale_y = zoomed_height / original_size.height()
+                        
+                        # Draw vertical lines
+                        for x in self.drawn_lines:
+                            display_x = int(x * scale_x) + draw_x
+                            if 0 <= display_x < final_pixmap.width():
+                                painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                        
+                        # Draw horizontal lines
+                        for y in self.drawn_horizontal_lines:
+                            display_y = int(y * scale_y) + draw_y
+                            if 0 <= display_y < final_pixmap.height():
+                                painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                        
+                        # Draw free lines
+                        for line in self.drawn_free_lines:
+                            start_x, start_y = line['start']
+                            end_x, end_y = line['end']
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        
+                        # Draw free strokes
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                display_start_x = int(start_x * scale_x) + draw_x
+                                display_start_y = int(start_y * scale_y) + draw_y
+                                display_end_x = int(end_x * scale_x) + draw_x
+                                display_end_y = int(end_y * scale_y) + draw_y
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        
+                        painter.end()
+                    
+                    # Handle image visibility toggle
+                    if not self.image_visible:
+                        # Create a blank pixmap with the same size but keep lines visible
+                        blank_pixmap = QPixmap(final_pixmap.size())
+                        blank_pixmap.fill(Qt.black)  # Fill with black background
+                        
+                        # If there are lines, copy them from final_pixmap to blank_pixmap
+                        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                            painter = QPainter(blank_pixmap)
+                            painter.setRenderHint(QPainter.Antialiasing, False)
+                            painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                            
+                            # Use the same coordinate transformations as above
+                            original_size = processed_pixmap.size()
+                            label_size = self.image_label.size()
+                            zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                            
+                            if self.rotation_angle == 90 or self.rotation_angle == 270:
+                                display_ref = QSize(original_size.height(), original_size.width())
+                            else:
+                                display_ref = original_size
+                                
+                            base_scaled = display_ref.scaled(label_size, Qt.KeepAspectRatio)
+                            zoomed_width = int(base_scaled.width() * zoom_factor)
+                            zoomed_height = int(base_scaled.height() * zoom_factor)
+                            
+                            draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+                            draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+                            
+                            scale_x = zoomed_width / original_size.width()
+                            scale_y = zoomed_height / original_size.height()
+                            
+                            # Draw vertical lines
+                            for x in self.drawn_lines:
+                                display_x = int(x * scale_x) + draw_x
+                                if 0 <= display_x < blank_pixmap.width():
+                                    painter.drawLine(display_x, 0, display_x, blank_pixmap.height())
+                            
+                            # Draw horizontal lines
+                            for y in self.drawn_horizontal_lines:
+                                display_y = int(y * scale_y) + draw_y
+                                if 0 <= display_y < blank_pixmap.height():
+                                    painter.drawLine(0, display_y, blank_pixmap.width(), display_y)
+                            
+                            # Draw free lines
+                            for line in self.drawn_free_lines:
+                                start_x, start_y = line['start']
+                                end_x, end_y = line['end']
+                                display_start_x = int(start_x * scale_x) + draw_x
+                                display_start_y = int(start_y * scale_y) + draw_y
+                                display_end_x = int(end_x * scale_x) + draw_x
+                                display_end_y = int(end_y * scale_y) + draw_y
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                            
+                            # Draw free strokes
+                            painter.setRenderHint(QPainter.Antialiasing, True)
+                            for stroke in self.drawn_free_strokes:
+                                if len(stroke) < 2:
+                                    continue
+                                for i in range(len(stroke) - 1):
+                                    start_x, start_y = stroke[i]
+                                    end_x, end_y = stroke[i + 1]
+                                    display_start_x = int(start_x * scale_x) + draw_x
+                                    display_start_y = int(start_y * scale_y) + draw_y
+                                    display_end_x = int(end_x * scale_x) + draw_x
+                                    display_end_y = int(end_y * scale_y) + draw_y
+                                    painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                            painter.setRenderHint(QPainter.Antialiasing, False)
+                            
+                            painter.end()
+                        
+                        final_pixmap = blank_pixmap
+                    
                     self.image_label.setPixmap(final_pixmap)
-                    if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines)
-                        and hasattr(self, '_fast_line_update')):
-                        self._fast_line_update()
                     
                     zoom = getattr(self.image_label, 'zoom_factor', 1.0)
                     self.status.showMessage(f"Zoom: {zoom:.1f}x (LUT cached)")
@@ -5993,9 +6886,147 @@ class RandomImageViewer(QMainWindow):
             if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
                 preview_pixmap = self._apply_cached_transforms(preview_pixmap)
             final_pixmap = self._scale_pixmap(preview_pixmap, self.current_image)
+            
+            # Draw lines directly on the scaled pixmap if any exist
+            if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                painter = QPainter(final_pixmap)
+                painter.setRenderHint(QPainter.Antialiasing, False)
+                painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                
+                # Get transformation parameters
+                original_size = preview_pixmap.size()
+                label_size = self.image_label.size()
+                zoom_factor = self.image_label.zoom_factor
+                
+                # Calculate scaling factors
+                if self.rotation_angle == 90 or self.rotation_angle == 270:
+                    display_ref = QSize(original_size.height(), original_size.width())
+                else:
+                    display_ref = original_size
+                    
+                base_scaled = display_ref.scaled(label_size, Qt.KeepAspectRatio)
+                zoomed_width = int(base_scaled.width() * zoom_factor)
+                zoomed_height = int(base_scaled.height() * zoom_factor)
+                
+                draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+                draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+                
+                scale_x = zoomed_width / original_size.width()
+                scale_y = zoomed_height / original_size.height()
+                
+                # Draw vertical lines
+                for x in self.drawn_lines:
+                    display_x = int(x * scale_x) + draw_x
+                    if 0 <= display_x < final_pixmap.width():
+                        painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                
+                # Draw horizontal lines
+                for y in self.drawn_horizontal_lines:
+                    display_y = int(y * scale_y) + draw_y
+                    if 0 <= display_y < final_pixmap.height():
+                        painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                
+                # Draw free lines
+                for line in self.drawn_free_lines:
+                    start_x, start_y = line['start']
+                    end_x, end_y = line['end']
+                    display_start_x = int(start_x * scale_x) + draw_x
+                    display_start_y = int(start_y * scale_y) + draw_y
+                    display_end_x = int(end_x * scale_x) + draw_x
+                    display_end_y = int(end_y * scale_y) + draw_y
+                    painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                
+                # Draw free strokes
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                for stroke in self.drawn_free_strokes:
+                    if len(stroke) < 2:
+                        continue
+                    for i in range(len(stroke) - 1):
+                        start_x, start_y = stroke[i]
+                        end_x, end_y = stroke[i + 1]
+                        display_start_x = int(start_x * scale_x) + draw_x
+                        display_start_y = int(start_y * scale_y) + draw_y
+                        display_end_x = int(end_x * scale_x) + draw_x
+                        display_end_y = int(end_y * scale_y) + draw_y
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                painter.setRenderHint(QPainter.Antialiasing, False)
+                
+                painter.end()
+            
+            # Handle image visibility toggle
+            if not self.image_visible:
+                # Create a blank pixmap with the same size but keep lines visible
+                blank_pixmap = QPixmap(final_pixmap.size())
+                blank_pixmap.fill(Qt.black)  # Fill with black background
+                
+                # If there are lines, copy them from final_pixmap to blank_pixmap
+                if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                    painter = QPainter(blank_pixmap)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                    
+                    # Use the same coordinate transformations as above
+                    original_size = preview_pixmap.size()
+                    label_size = self.image_label.size()
+                    zoom_factor = self.image_label.zoom_factor
+                    
+                    if self.rotation_angle == 90 or self.rotation_angle == 270:
+                        display_ref = QSize(original_size.height(), original_size.width())
+                    else:
+                        display_ref = original_size
+                        
+                    base_scaled = display_ref.scaled(label_size, Qt.KeepAspectRatio)
+                    zoomed_width = int(base_scaled.width() * zoom_factor)
+                    zoomed_height = int(base_scaled.height() * zoom_factor)
+                    
+                    draw_x = (label_size.width() - zoomed_width) // 2 + int(self.image_label.pan_offset_x)
+                    draw_y = (label_size.height() - zoomed_height) // 2 + int(self.image_label.pan_offset_y)
+                    
+                    scale_x = zoomed_width / original_size.width()
+                    scale_y = zoomed_height / original_size.height()
+                    
+                    # Draw vertical lines
+                    for x in self.drawn_lines:
+                        display_x = int(x * scale_x) + draw_x
+                        if 0 <= display_x < blank_pixmap.width():
+                            painter.drawLine(display_x, 0, display_x, blank_pixmap.height())
+                    
+                    # Draw horizontal lines
+                    for y in self.drawn_horizontal_lines:
+                        display_y = int(y * scale_y) + draw_y
+                        if 0 <= display_y < blank_pixmap.height():
+                            painter.drawLine(0, display_y, blank_pixmap.width(), display_y)
+                    
+                    # Draw free lines
+                    for line in self.drawn_free_lines:
+                        start_x, start_y = line['start']
+                        end_x, end_y = line['end']
+                        display_start_x = int(start_x * scale_x) + draw_x
+                        display_start_y = int(start_y * scale_y) + draw_y
+                        display_end_x = int(end_x * scale_x) + draw_x
+                        display_end_y = int(end_y * scale_y) + draw_y
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    
+                    # Draw free strokes
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    for stroke in self.drawn_free_strokes:
+                        if len(stroke) < 2:
+                            continue
+                        for i in range(len(stroke) - 1):
+                            start_x, start_y = stroke[i]
+                            end_x, end_y = stroke[i + 1]
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    
+                    painter.end()
+                
+                final_pixmap = blank_pixmap
+            
             self.image_label.setPixmap(final_pixmap)
-            if (self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines) and hasattr(self, '_fast_line_update')):
-                self._fast_line_update()
             zoom = getattr(self.image_label, 'zoom_factor', 1.0)
             # Show more specific status based on whether LUT was applied
             if self.lut_enabled and self.current_lut and self.lut_strength > 0:
@@ -6015,6 +7046,115 @@ class RandomImageViewer(QMainWindow):
                     if error or original_pixmap.isNull():
                         return
                 final_pixmap = self._scale_pixmap(original_pixmap, self.current_image)
+                
+                # Draw lines on emergency fallback if any exist
+                if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                    painter = QPainter(final_pixmap)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                    
+                    # Simple scaling for emergency fallback
+                    original_size = original_pixmap.size()
+                    scale_x = final_pixmap.width() / original_size.width()
+                    scale_y = final_pixmap.height() / original_size.height()
+                    
+                    # Draw vertical lines
+                    for x in self.drawn_lines:
+                        display_x = int(x * scale_x)
+                        if 0 <= display_x < final_pixmap.width():
+                            painter.drawLine(display_x, 0, display_x, final_pixmap.height())
+                    
+                    # Draw horizontal lines
+                    for y in self.drawn_horizontal_lines:
+                        display_y = int(y * scale_y)
+                        if 0 <= display_y < final_pixmap.height():
+                            painter.drawLine(0, display_y, final_pixmap.width(), display_y)
+                    
+                    # Draw free lines
+                    for line in self.drawn_free_lines:
+                        start_x, start_y = line['start']
+                        end_x, end_y = line['end']
+                        display_start_x = int(start_x * scale_x)
+                        display_start_y = int(start_y * scale_y)
+                        display_end_x = int(end_x * scale_x)
+                        display_end_y = int(end_y * scale_y)
+                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    
+                    # Draw free strokes
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    for stroke in self.drawn_free_strokes:
+                        if len(stroke) < 2:
+                            continue
+                        for i in range(len(stroke) - 1):
+                            start_x, start_y = stroke[i]
+                            end_x, end_y = stroke[i + 1]
+                            display_start_x = int(start_x * scale_x)
+                            display_start_y = int(start_y * scale_y)
+                            display_end_x = int(end_x * scale_x)
+                            display_end_y = int(end_y * scale_y)
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    
+                    painter.end()
+                
+                # Handle image visibility toggle
+                if not self.image_visible:
+                    # Create a blank pixmap with the same size but keep lines visible
+                    blank_pixmap = QPixmap(final_pixmap.size())
+                    blank_pixmap.fill(Qt.black)  # Fill with black background
+                    
+                    # If there are lines, copy them from final_pixmap to blank_pixmap
+                    if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
+                        painter = QPainter(blank_pixmap)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        
+                        # Use the same coordinate transformations as above
+                        original_size = original_pixmap.size()
+                        scale_x = final_pixmap.width() / original_size.width()
+                        scale_y = final_pixmap.height() / original_size.height()
+                        
+                        # Draw vertical lines
+                        for x in self.drawn_lines:
+                            display_x = int(x * scale_x)
+                            if 0 <= display_x < blank_pixmap.width():
+                                painter.drawLine(display_x, 0, display_x, blank_pixmap.height())
+                        
+                        # Draw horizontal lines
+                        for y in self.drawn_horizontal_lines:
+                            display_y = int(y * scale_y)
+                            if 0 <= display_y < blank_pixmap.height():
+                                painter.drawLine(0, display_y, blank_pixmap.width(), display_y)
+                        
+                        # Draw free lines
+                        for line in self.drawn_free_lines:
+                            start_x, start_y = line['start']
+                            end_x, end_y = line['end']
+                            display_start_x = int(start_x * scale_x)
+                            display_start_y = int(start_y * scale_y)
+                            display_end_x = int(end_x * scale_x)
+                            display_end_y = int(end_y * scale_y)
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        
+                        # Draw free strokes
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                display_start_x = int(start_x * scale_x)
+                                display_start_y = int(start_y * scale_y)
+                                display_end_x = int(end_x * scale_x)
+                                display_end_y = int(end_y * scale_y)
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                        
+                        painter.end()
+                    
+                    final_pixmap = blank_pixmap
+                
                 self.image_label.setPixmap(final_pixmap)
             except Exception as fallback_e:
                 print(f"Fallback also failed: {fallback_e}")
@@ -6030,14 +7170,15 @@ class RandomImageViewer(QMainWindow):
         
         # Include line information in cache key
         lines_key = ""
-        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines):
+        if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
             # Create a compact representation of all lines
             vlines = f"v{len(self.drawn_lines)}" if self.drawn_lines else ""
             hlines = f"h{len(self.drawn_horizontal_lines)}" if self.drawn_horizontal_lines else ""
             flines = f"f{len(self.drawn_free_lines)}" if self.drawn_free_lines else ""
+            strokes = f"s{len(self.drawn_free_strokes)}" if self.drawn_free_strokes else ""
             color_key = self.line_color.name()
             thickness_key = str(self.line_thickness)
-            lines_key = f"_lines_{vlines}{hlines}{flines}_{color_key}_{thickness_key}"
+            lines_key = f"_lines_{vlines}{hlines}{flines}{strokes}_{color_key}_{thickness_key}"
         
         # Include enhancement settings in cache key
         enhancements_key = ""
@@ -6265,6 +7406,8 @@ class RandomImageViewer(QMainWindow):
         if self.history_index > 0:
             self.history_index -= 1
             img_path = self.history[self.history_index]
+            # Clear all drawn lines when switching images
+            self.clear_lines()
             self._display_image_with_lut_preview(img_path)
             self.current_image = img_path
             self.update_image_info(img_path)
@@ -6283,6 +7426,8 @@ class RandomImageViewer(QMainWindow):
             if self.history_index < len(self.history) - 1:
                 self.history_index += 1
                 img_path = self.history[self.history_index]
+                # Clear all drawn lines when switching images
+                self.clear_lines()
                 self._display_image_with_lut_preview(img_path)
                 self.current_image = img_path
                 self.update_image_info(img_path)
@@ -6304,6 +7449,8 @@ class RandomImageViewer(QMainWindow):
                 next_index = 0
             
             img_path = self.images[next_index]
+            # Clear all drawn lines when switching images
+            self.clear_lines()
             self._display_image_with_lut_preview(img_path)
             self.add_to_history(img_path)
             self.current_image = img_path
