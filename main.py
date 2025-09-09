@@ -27,8 +27,8 @@ from PySide6.QtWidgets import (
     QStatusBar, QToolBar, QToolButton, QSizePolicy, QSlider, QHBoxLayout,
     QStyle, QStyleOptionSlider, QGridLayout, QMenu, QColorDialog, QComboBox
 )
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction, QShortcut, QImage
-from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QRect
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QIcon, QColorTransform, QMouseEvent, QImageReader, QTransform, QAction, QShortcut, QImage, QTabletEvent
+from PySide6.QtCore import Qt, QTimer, QSize, QElapsedTimer, QRect, QEvent
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
 
@@ -446,6 +446,11 @@ class ImageLabel(QLabel):
         self.parent_viewer = None
         self.setMouseTracking(True)
         
+        # 🎨 PEN PRESSURE: Start with tablet tracking disabled to allow normal UI interaction
+        # It will be enabled only when free draw mode is active
+        self.setTabletTracking(False)
+        self.setAttribute(Qt.WA_TabletTracking, False)
+        
         # Zoom functionality
         self.zoom_factor = 1.0
         self.min_zoom = 0.1
@@ -576,7 +581,7 @@ class ImageLabel(QLabel):
             event.accept()
             return
         
-        # Handle left-click for line drawing
+    # Handle left-click for line drawing / free draw (only if inside image bounds)
         if (self.parent_viewer and event.button() == Qt.LeftButton and 
             self.pixmap() and not self.pixmap().isNull()):
             
@@ -590,8 +595,30 @@ class ImageLabel(QLabel):
                 super().mousePressEvent(event)
                 return
             
-            # Get click position
+            # Get click position and verify it's over image (prevents accidental toolbar toggles drawing)
             click_pos = event.position()
+            if not self._is_position_over_image(click_pos):
+                # If we are currently drawing a free stroke and click outside, finalize the stroke
+                if (self.parent_viewer.free_draw_mode and self.parent_viewer.is_drawing_free_stroke):
+                    self.parent_viewer.end_free_draw_stroke()
+                # Also allow this click to pass through so buttons can toggle modes
+                super().mousePressEvent(event)
+                return
+            
+            # 🎨 PEN PRESSURE: Capture pressure information from the event
+            pressure = 1.0  # Default pressure
+            if self.parent_viewer and self.parent_viewer.pen_pressure_enabled:
+                pressure = getattr(event, 'pressure', lambda: 1.0)()
+                if callable(pressure):
+                    pressure = pressure()
+            
+            # Normalize pressure to 0.1-1.0 range for better control
+            pressure = max(0.1, min(1.0, pressure))
+            
+            if self.parent_viewer and self.parent_viewer.pen_pressure_enabled:
+                print(f"🎨 PEN PRESSURE: Mouse press detected pressure = {pressure:.3f}")
+                if pressure != 1.0:
+                    print(f"🎨 PEN PRESSURE: Pressure varies from default! This means your tablet is working.")
             
             # Get original image for coordinate reference
             try:
@@ -696,8 +723,12 @@ class ImageLabel(QLabel):
                 if self.parent_viewer.free_line_drawing_mode:
                     self.parent_viewer.add_free_line_point(original_x, original_y)
                 if self.parent_viewer.free_draw_mode:
-                    print(f"DEBUG: Mouse press in free draw mode at ({original_x:.1f}, {original_y:.1f})")
-                    self.parent_viewer.start_free_draw_stroke(original_x, original_y)
+                    print(f"Mouse press in free draw mode at ({original_x:.1f}, {original_y:.1f})")
+                    self.parent_viewer.start_free_draw_stroke(original_x, original_y, pressure)
+                    
+                    # 🎨 PEN PRESSURE: Store current pressure for real-time painting
+                    if self.parent_viewer and self.parent_viewer.pen_pressure_enabled:
+                        self.parent_viewer._current_pressure = pressure
         
         super().mousePressEvent(event)
     
@@ -722,6 +753,27 @@ class ImageLabel(QLabel):
         if (self.parent_viewer and self.parent_viewer.free_draw_mode and 
             self.parent_viewer.is_drawing_free_stroke and event.buttons() & Qt.LeftButton and
             self.pixmap() and not self.pixmap().isNull()):
+            # Abort drawing if cursor left the image bounds; finalize stroke so pen can interact with UI
+            if not self._is_position_over_image(event.position()):
+                self.parent_viewer.end_free_draw_stroke()
+                super().mouseMoveEvent(event)
+                return
+            
+            # 🎨 PEN PRESSURE: Capture pressure from mouse event or stored tablet pressure
+            pressure = 1.0  # Default pressure
+            if self.parent_viewer and self.parent_viewer.pen_pressure_enabled:
+                # First try to get pressure from mouse event
+                mouse_pressure = getattr(event, 'pressure', lambda: 1.0)()
+                if callable(mouse_pressure):
+                    mouse_pressure = mouse_pressure()
+                
+                # If pressure is still 1.0, check if we have tablet pressure stored
+                if mouse_pressure == 1.0 and hasattr(self.parent_viewer, '_tablet_pressure'):
+                    pressure = self.parent_viewer._tablet_pressure
+                else:
+                    pressure = mouse_pressure
+                    
+            pressure = max(0.1, min(1.0, pressure))
             
             # ⚡ ULTRA-FAST: Use cached coordinate conversion
             if not self.parent_viewer.drawing_cache:
@@ -768,13 +820,113 @@ class ImageLabel(QLabel):
                     original_y = original_size.height() - unrotated_y
                 
                 # ⚡ REAL-TIME PERFORMANCE: Add point with immediate visual feedback
-                self.parent_viewer.add_free_draw_point(original_x, original_y)
+                self.parent_viewer.add_free_draw_point(original_x, original_y, pressure)
+                
+                # 🎨 PEN PRESSURE: Update current pressure for real-time painting
+                if self.parent_viewer and self.parent_viewer.pen_pressure_enabled:
+                    self.parent_viewer._current_pressure = pressure
             
             event.accept()
             return
         
         super().mouseMoveEvent(event)
     
+    def _is_position_over_image(self, pos):
+        """Check if a position is over the actual image content (not just the widget)"""
+        if not self.pixmap() or self.pixmap().isNull():
+            return False
+        
+        # First, check if the position is over UI elements using widget detection
+        if self.parent_viewer:
+            # Convert position to global coordinates
+            global_pos = self.mapToGlobal(pos)
+            
+            # Convert QPointF to QPoint for widgetAt() method
+            global_point = global_pos.toPoint()
+            
+            # Find which widget is actually at this position
+            widget_at_pos = QApplication.widgetAt(global_point)
+            
+            # If there's a widget at this position and it's not the ImageLabel itself, 
+            # then we're over a UI element - return False immediately
+            if widget_at_pos and widget_at_pos != self:
+                return False
+            
+            # Additional specific checks for main UI areas
+            main_window_pos = self.parent_viewer.mapFromGlobal(global_pos)
+            main_window_point = main_window_pos.toPoint()
+            
+            # Check if clicking on the main toolbar area
+            if (hasattr(self.parent_viewer, 'main_toolbar') and 
+                self.parent_viewer.main_toolbar.isVisible() and 
+                self.parent_viewer.main_toolbar.geometry().contains(main_window_point)):
+                return False
+            
+            # Check if clicking on the timer toolbar area
+            if (hasattr(self.parent_viewer, 'timer_toolbar') and 
+                self.parent_viewer.timer_toolbar.isVisible() and 
+                self.parent_viewer.timer_toolbar.geometry().contains(main_window_point)):
+                return False
+            
+            # Check if clicking on the status bar area
+            if (hasattr(self.parent_viewer, 'status') and 
+                self.parent_viewer.status.isVisible() and
+                self.parent_viewer.status.geometry().contains(main_window_point)):
+                return False
+            
+        # If no UI element detected, check if position is within actual image bounds
+        # Calculate image display bounds (same logic as mousePressEvent)
+        label_size = self.size()
+        original_size = self.pixmap().size()
+        
+        base_scaled = self.pixmap().scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        zoomed_width = int(base_scaled.width() * self.zoom_factor)
+        zoomed_height = int(base_scaled.height() * self.zoom_factor)
+        
+        draw_x = (label_size.width() - zoomed_width) // 2 + int(self.pan_offset_x)
+        draw_y = (label_size.height() - zoomed_height) // 2 + int(self.pan_offset_y)
+        
+        rel_x = pos.x() - draw_x
+        rel_y = pos.y() - draw_y
+        
+        return (0 <= rel_x <= zoomed_width and 0 <= rel_y <= zoomed_height)
+
+    def tabletEvent(self, event):
+        """Handle tablet events ONLY for pen pressure during active drawing"""
+        # CRITICAL: Only process tablet events when we're actively drawing inside the image
+        # This prevents tablet events from interfering with UI interactions
+        
+        if not (self.parent_viewer and self.parent_viewer.free_draw_mode):
+            # Not in free draw mode - completely ignore tablet events
+            event.ignore()
+            return
+        
+        # Only process tablet events if we're currently drawing AND over the image
+        if (self.parent_viewer.is_drawing_free_stroke and 
+            self._is_position_over_image(event.position())):
+            
+            if event.type() == QTabletEvent.TabletMove:
+                # Extract pressure and store it for mouse events to use
+                pressure = event.pressure()
+                if self.parent_viewer:
+                    self.parent_viewer._tablet_pressure = pressure
+                # Don't accept the event - let it become a mouse event too
+                event.ignore()
+                return
+                
+            elif event.type() == QTabletEvent.TabletPress:
+                # Extract pressure for press events
+                pressure = event.pressure()
+                if self.parent_viewer:
+                    self.parent_viewer._tablet_pressure = pressure
+                # Don't accept the event - let it become a mouse event too
+                event.ignore()
+                return
+        
+        # For all other cases (not drawing, not over image, etc.), ignore tablet events
+        # This allows normal UI interaction when not actively drawing
+        event.ignore()
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.RightButton and self.is_panning:
             self.is_panning = False
@@ -786,7 +938,7 @@ class ImageLabel(QLabel):
         # Handle free draw mode mouse release
         if (event.button() == Qt.LeftButton and self.parent_viewer and 
             self.parent_viewer.free_draw_mode and self.parent_viewer.is_drawing_free_stroke):
-            print(f"DEBUG: Mouse release in free draw mode")
+            print(f"Mouse release in free draw mode")
             self.parent_viewer.end_free_draw_stroke()
             event.accept()
             return
@@ -1916,8 +2068,15 @@ class RandomImageViewer(QMainWindow):
                             if len(stroke) < 2:
                                 continue
                             for i in range(len(stroke) - 1):
-                                start_x, start_y = stroke[i]
-                                end_x, end_y = stroke[i + 1]
+                                # 🎨 PEN PRESSURE: Handle both old 2-tuple and new 3-tuple formats
+                                if len(stroke[i]) == 3:
+                                    start_x, start_y, _ = stroke[i]
+                                else:
+                                    start_x, start_y = stroke[i]
+                                if len(stroke[i + 1]) == 3:
+                                    end_x, end_y, _ = stroke[i + 1]
+                                else:
+                                    end_x, end_y = stroke[i + 1]
                                 
                                 # Apply flip transformations first
                                 flip_start_x = start_x if not self.flipped_h else original_size.width() - start_x
@@ -1972,8 +2131,15 @@ class RandomImageViewer(QMainWindow):
                             if len(stroke) < 2:
                                 continue
                             for i in range(len(stroke) - 1):
-                                start_x, start_y = stroke[i]
-                                end_x, end_y = stroke[i + 1]
+                                # 🎨 PEN PRESSURE: Handle both old 2-tuple and new 3-tuple formats
+                                if len(stroke[i]) == 3:
+                                    start_x, start_y, _ = stroke[i]
+                                else:
+                                    start_x, start_y = stroke[i]
+                                if len(stroke[i + 1]) == 3:
+                                    end_x, end_y, _ = stroke[i + 1]
+                                else:
+                                    end_x, end_y = stroke[i + 1]
                                 painter.drawLine(int(start_x * scale_x) + offset_x, int(start_y * scale_y) + offset_y,
                                                int(end_x * scale_x) + offset_x, int(end_y * scale_y) + offset_y)
                         painter.setRenderHint(QPainter.Antialiasing, False)
@@ -2006,8 +2172,15 @@ class RandomImageViewer(QMainWindow):
                         if len(stroke) < 2:
                             continue
                         for i in range(len(stroke) - 1):
-                            start_x, start_y = stroke[i]
-                            end_x, end_y = stroke[i + 1]
+                            # 🎨 PEN PRESSURE: Handle both old 2-tuple and new 3-tuple formats
+                            if len(stroke[i]) == 3:
+                                start_x, start_y, _ = stroke[i]
+                            else:
+                                start_x, start_y = stroke[i]
+                            if len(stroke[i + 1]) == 3:
+                                end_x, end_y, _ = stroke[i + 1]
+                            else:
+                                end_x, end_y = stroke[i + 1]
                             painter.drawLine(int(start_x * scale_x), int(start_y * scale_y),
                                            int(end_x * scale_x), int(end_y * scale_y))
                     painter.setRenderHint(QPainter.Antialiasing, False)
@@ -2063,7 +2236,7 @@ class RandomImageViewer(QMainWindow):
         self.stroke_update_timer = QTimer(self)
         self.stroke_update_timer.setSingleShot(True)
         self.stroke_update_timer.timeout.connect(self._update_display_with_overlay)
-        self.stroke_update_timer.setInterval(4)  # ~250 FPS updates for maximum responsiveness
+        self.stroke_update_timer.setInterval(2)  # ⚡ INCREASED: ~500 FPS for ultra-responsive drawing
         self.drawn_lines = []  # List of x positions for vertical lines
         self.drawn_horizontal_lines = []  # List of y positions for horizontal lines
         self.drawn_free_lines = []  # List of free lines, each with start and end points
@@ -2073,8 +2246,13 @@ class RandomImageViewer(QMainWindow):
         self.is_drawing = False  # NEW: Track if currently drawing a stroke
         self.lines_visible = True  # New: Toggle line visibility
         self.image_visible = True  # New: Toggle image visibility
-        self.line_thickness = 1  # Mfffake lines thicker for better visibility
-        self.line_color = QColor("#FFFFFF")
+        self.line_thickness = 5  # Default line thickness (increased for better pen pressure visibility)
+        self.line_color = QColor("#FFFFFF")  # Default white color
+        self.line_antialiasing = True  # Enable antialiasing for smoother lines
+        self.performance_mode = True  # NEW: Performance mode toggle (True = fast, False = quality)
+        self.pen_pressure_enabled = True  # 🎨 NEW: Pen pressure sensitivity toggle
+        self._current_pressure = 1.0  # 🎨 NEW: Current pressure value for real-time painting
+        self._tablet_pressure = 1.0  # 🎨 NEW: Stored tablet pressure for mouse event compatibility
         # Always on top functionality
         self.always_on_top = False
 
@@ -2166,6 +2344,12 @@ class RandomImageViewer(QMainWindow):
             except Exception as e:
                 print(f"Failed loading default LUT folder {self.default_lut_path}: {e}")
 
+    def tabletEvent(self, event):
+        """Forward tablet events to the ImageLabel for proper pressure handling"""
+        if hasattr(self, 'image_label') and self.image_label:
+            # Forward the tablet event to the ImageLabel
+            self.image_label.tabletEvent(event)
+
     def set_window_icon(self):
         """Set the window icon from available icon files"""
         try:
@@ -2213,6 +2397,10 @@ class RandomImageViewer(QMainWindow):
             traceback.print_exc()
 
     def init_ui(self):
+        # 🎨 Enable tablet tracking on main window for proper pressure support
+        self.setTabletTracking(True)
+        self.setAttribute(Qt.WA_TabletTracking, True)
+        
         # Create main toolbar
         self.main_toolbar = QToolBar("Main Toolbar")
         self.main_toolbar.setIconSize(QSize(20, 20))
@@ -2248,6 +2436,8 @@ class RandomImageViewer(QMainWindow):
         self.setCentralWidget(central_splitter)
 
         image_widget = QWidget()
+        image_widget.setTabletTracking(True)
+        image_widget.setAttribute(Qt.WA_TabletTracking, True)
         image_layout = QVBoxLayout(image_widget)
         image_layout.setContentsMargins(6, 6, 6, 6)
 
@@ -2318,6 +2508,18 @@ class RandomImageViewer(QMainWindow):
         self.ctrl_r_shortcut = QShortcut("Ctrl+R", self)
         self.ctrl_r_shortcut.activated.connect(self.reset_enhancements)
         
+        # Undo line shortcut
+        self.ctrl_z_shortcut = QShortcut("Ctrl+Z", self)
+        self.ctrl_z_shortcut.activated.connect(self.undo_last_line)
+        
+        # Toggle antialiasing shortcut
+        self.ctrl_shift_a_shortcut = QShortcut("Ctrl+Shift+A", self)
+        self.ctrl_shift_a_shortcut.activated.connect(lambda: self.toggle_line_antialiasing(not self.line_antialiasing))
+        
+        # 🎨 PEN PRESSURE: Test shortcut
+        self.ctrl_shift_p_shortcut = QShortcut("Ctrl+Shift+P", self)
+        self.ctrl_shift_p_shortcut.activated.connect(self.test_pen_pressure)
+        
         # Zoom shortcuts
         self.ctrl_plus_shortcut = QShortcut("Ctrl++", self)
         self.ctrl_plus_shortcut.activated.connect(self.zoom_in)
@@ -2378,6 +2580,12 @@ class RandomImageViewer(QMainWindow):
         self.line_color_btn = QToolButton(); self.line_color_btn.setText("🎨"); self.line_color_btn.setToolTip("Choose Line Color"); self.line_color_btn.setFixedSize(24,24); self.line_color_btn.clicked.connect(self.choose_line_color); self.line_color_btn.setStyleSheet(f"QToolButton {{ background-color: {self.line_color.name()}; border:1px solid #666; }}"); toolbar.addWidget(self.line_color_btn)
         for color_hex, color_name, emoji in [("#ffffff","White","⚪"),("#000000","Black","⚫"),("#808080","Grey","⚪")]:
             btn=QToolButton(); btn.setText(emoji); btn.setToolTip(f"Set Line Color to {color_name}"); btn.setFixedSize(18,24); btn.clicked.connect(lambda checked, c=color_hex: self.set_line_color(c)); btn.setStyleSheet("QToolButton { border:1px solid #444; margin:1px; }"); toolbar.addWidget(btn)
+        add_spacer(4)
+        # NEW: Antialiasing toggle for smoother lines
+        self.antialiasing_btn = QToolButton(); self.antialiasing_btn.setText("✨"); self.antialiasing_btn.setToolTip("Toggle Line Antialiasing (Smoother Lines)"); self.antialiasing_btn.setCheckable(True); self.antialiasing_btn.setChecked(self.line_antialiasing); self.antialiasing_btn.setFixedSize(24,24); self.antialiasing_btn.toggled.connect(self.toggle_line_antialiasing); toolbar.addWidget(self.antialiasing_btn)
+        add_spacer(4)
+        # 🎨 PEN PRESSURE: Add pen pressure toggle
+        self.pen_pressure_btn = QToolButton(); self.pen_pressure_btn.setText("🎨"); self.pen_pressure_btn.setToolTip("Toggle Pen Pressure Sensitivity (varies line thickness)"); self.pen_pressure_btn.setCheckable(True); self.pen_pressure_btn.setChecked(True); self.pen_pressure_btn.setFixedSize(24,24); self.pen_pressure_btn.toggled.connect(self.toggle_pen_pressure); toolbar.addWidget(self.pen_pressure_btn)
         add_spacer(4)
         clear_lines_btn = QToolButton(); clear_lines_btn.setText("🗑"); clear_lines_btn.setToolTip("Clear All Lines"); clear_lines_btn.setFixedSize(24,24); clear_lines_btn.clicked.connect(self.clear_lines); toolbar.addWidget(clear_lines_btn)
         add_spacer(4)
@@ -2986,7 +3194,6 @@ class RandomImageViewer(QMainWindow):
         
         # Draw lines on the scaled pixmap if any exist AND lines are visible
         if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
-            print(f"DEBUG: Rendering lines - strokes: {len(self.drawn_free_strokes) if self.drawn_free_strokes else 0}")
             final_pixmap = scaled_pixmap.copy()
             painter = QPainter(final_pixmap)
             painter.setRenderHint(QPainter.Antialiasing, False)
@@ -3142,46 +3349,121 @@ class RandomImageViewer(QMainWindow):
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         painter.setRenderHint(QPainter.Antialiasing, False)
                 
-                # Draw free draw strokes (adjusted for flips and rotation)
-                for stroke in self.drawn_free_strokes:
-                    if len(stroke) < 2:
-                        continue  # Need at least 2 points to draw
+                # ⚡ OPTIMIZED FREE DRAW STROKES: Pre-calculate transformations for performance
+                if self.drawn_free_strokes:
+                    # Pre-calculate transformation parameters to avoid repeated calculations
+                    has_transforms = self.rotation_angle != 0 or self.flipped_h or self.flipped_v
                     
-                    # Convert stroke points with same transformation as free lines
-                    for i in range(len(stroke) - 1):
-                        start_x, start_y = stroke[i]
-                        end_x, end_y = stroke[i + 1]
+                    if has_transforms:
+                        # Pre-calculate transformation values for better performance
+                        painter.setRenderHint(QPainter.Antialiasing, True)
                         
-                        # Apply flips first (same as free lines)
-                        flip_start_x = original_size.width() - start_x if self.flipped_h else start_x
-                        flip_start_y = original_size.height() - start_y if self.flipped_v else start_y
-                        flip_end_x = original_size.width() - end_x if self.flipped_h else end_x
-                        flip_end_y = original_size.height() - end_y if self.flipped_v else end_y
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            
+                            # Process stroke segments with optimized transformations
+                            for i in range(len(stroke) - 1):
+                                # 🎨 PEN PRESSURE: Handle 3-tuple format (x, y, pressure)
+                                if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                    start_x, start_y, start_pressure = stroke[i]
+                                    end_x, end_y, end_pressure = stroke[i + 1]
+                                else:
+                                    # Fallback for old format or when pressure is disabled
+                                    if len(stroke[i]) == 3:
+                                        start_x, start_y, _ = stroke[i]
+                                        end_x, end_y, _ = stroke[i + 1]
+                                    else:
+                                        start_x, start_y = stroke[i]
+                                        end_x, end_y = stroke[i + 1]
+                                    start_pressure = end_pressure = 1.0
+                                
+                                # 🎨 PEN PRESSURE: Calculate dynamic thickness based on pressure
+                                if self.pen_pressure_enabled:
+                                    avg_pressure = (start_pressure + end_pressure) / 2.0
+                                    dynamic_thickness = max(1, int(self.line_thickness * avg_pressure))
+                                else:
+                                    dynamic_thickness = self.line_thickness
+                                
+                                # ⚡ FAST TRANSFORMATION: Apply flips first (simple arithmetic)
+                                if self.flipped_h:
+                                    start_x = original_size.width() - start_x
+                                    end_x = original_size.width() - end_x
+                                if self.flipped_v:
+                                    start_y = original_size.height() - start_y
+                                    end_y = original_size.height() - end_y
+                                
+                                # ⚡ FAST ROTATION: Use pre-calculated values
+                                if self.rotation_angle == 90:
+                                    # 90°: (x,y) -> (y, width-x)
+                                    temp_start_x = start_y
+                                    temp_start_y = original_size.width() - start_x
+                                    temp_end_x = end_y
+                                    temp_end_y = original_size.width() - end_x
+                                elif self.rotation_angle == 180:
+                                    # 180°: (x,y) -> (width-x, height-y)
+                                    temp_start_x = original_size.width() - start_x
+                                    temp_start_y = original_size.height() - start_y
+                                    temp_end_x = original_size.width() - end_x
+                                    temp_end_y = original_size.height() - end_y
+                                elif self.rotation_angle == 270:
+                                    # 270°: (x,y) -> (height-y, x)
+                                    temp_start_x = original_size.height() - start_y
+                                    temp_start_y = start_x
+                                    temp_end_x = original_size.height() - end_y
+                                    temp_end_y = end_x
+                                else:
+                                    # No rotation
+                                    temp_start_x, temp_start_y = start_x, start_y
+                                    temp_end_x, temp_end_y = end_x, end_y
+                                
+                                # Apply final scaling and positioning
+                                display_start_x = int(temp_start_x * scale_x) + draw_x
+                                display_start_y = int(temp_start_y * scale_y) + draw_y
+                                display_end_x = int(temp_end_x * scale_x) + draw_x
+                                display_end_y = int(temp_end_y * scale_y) + draw_y
+                                
+                                # 🎨 PEN PRESSURE: Use dynamic thickness for this segment
+                                pen = QPen(self.line_color, dynamic_thickness, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                                painter.setPen(pen)
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         
-                        # Apply rotation transformation
-                        if self.rotation_angle == 90:
-                            display_start_x = int(flip_start_y * scale_x) + draw_x
-                            display_start_y = int((original_size.width() - flip_start_x) * scale_y) + draw_y
-                            display_end_x = int(flip_end_y * scale_x) + draw_x
-                            display_end_y = int((original_size.width() - flip_end_x) * scale_y) + draw_y
-                        elif self.rotation_angle == 180:
-                            display_start_x = int((original_size.width() - flip_start_x) * scale_x) + draw_x
-                            display_start_y = int((original_size.height() - flip_start_y) * scale_y) + draw_y
-                            display_end_x = int((original_size.width() - flip_end_x) * scale_x) + draw_x
-                            display_end_y = int((original_size.height() - flip_end_y) * scale_y) + draw_y
-                        elif self.rotation_angle == 270:
-                            display_start_x = int(flip_start_y * scale_x) + draw_x
-                            display_start_y = int((original_size.height() - flip_start_x) * scale_y) + draw_y
-                            display_end_x = int(flip_end_y * scale_x) + draw_x
-                            display_end_y = int((original_size.height() - flip_end_x) * scale_y) + draw_y
-                        else:
-                            display_start_x = int(flip_start_x * scale_x) + draw_x
-                            display_start_y = int(flip_start_y * scale_y) + draw_y
-                            display_end_x = int(flip_end_x * scale_x) + draw_x
-                            display_end_y = int(flip_end_y * scale_y) + draw_y
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+                    else:
+                        # ⚡ ULTRA-FAST: No transformations needed - direct scaling only
+                        painter.setRenderHint(QPainter.Antialiasing, True)
                         
-                        # Draw the line segment
-                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            
+                            for i in range(len(stroke) - 1):
+                                # 🎨 PEN PRESSURE: Handle 3-tuple format (x, y, pressure)
+                                if len(stroke[i]) == 3:
+                                    start_x, start_y, start_pressure = stroke[i]
+                                    end_x, end_y, end_pressure = stroke[i + 1]
+                                else:
+                                    # Fallback for old format (no pressure)
+                                    start_x, start_y = stroke[i]
+                                    end_x, end_y = stroke[i + 1]
+                                    start_pressure = end_pressure = 1.0
+                                
+                                # 🎨 PEN PRESSURE: Calculate dynamic thickness based on pressure
+                                avg_pressure = (start_pressure + end_pressure) / 2.0
+                                dynamic_thickness = max(1, int(self.line_thickness * avg_pressure))
+                                
+                                # Direct scaling without any transformations
+                                display_start_x = int(start_x * scale_x) + draw_x
+                                display_start_y = int(start_y * scale_y) + draw_y
+                                display_end_x = int(end_x * scale_x) + draw_x
+                                display_end_y = int(end_y * scale_y) + draw_y
+                                
+                                # 🎨 PEN PRESSURE: Use dynamic thickness for this segment
+                                pen = QPen(self.line_color, dynamic_thickness, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                                painter.setPen(pen)
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        
+                        painter.setRenderHint(QPainter.Antialiasing, False)
             else:
                 # No rotation - original line drawing logic
                 # Draw vertical lines
@@ -3224,29 +3506,167 @@ class RandomImageViewer(QMainWindow):
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                 
                 # Draw free draw strokes (continuous paths)
-                print(f"DEBUG: Rendering free draw strokes - found {len(self.drawn_free_strokes)} strokes")
                 for stroke_idx, stroke in enumerate(self.drawn_free_strokes):
                     if len(stroke) < 2:
                         continue  # Need at least 2 points to draw
-                    
-                    print(f"DEBUG: Rendering stroke {stroke_idx} with {len(stroke)} points")
-                    
-                    # Convert stroke points to display coordinates
-                    for i in range(len(stroke) - 1):
-                        start_x, start_y = stroke[i]
-                        end_x, end_y = stroke[i + 1]
-                        
-                        # Use same coordinate transformation as free lines
-                        display_start_x = int(start_x * scale_x) + draw_x
-                        display_start_y = int(start_y * scale_y) + draw_y
-                        display_end_x = int(end_x * scale_x) + draw_x
-                        display_end_y = int(end_y * scale_y) + draw_y
-                        
-                        # Draw the line segment
-                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
-                        
-                        if i < 3:  # Debug first few segments
-                            print(f"DEBUG: Drawing segment {i}: ({display_start_x},{display_start_y}) to ({display_end_x},{display_end_y})")
+
+                    # Choose rendering method based on antialiasing setting
+                    if self.line_antialiasing and self.line_thickness > 1:
+                        # ✨ SMOOTH: Use QPainter with antialiasing for professional quality
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+                        # Draw smooth connected line segments with proper transformations
+                        for i in range(len(stroke) - 1):
+                            # 🎨 PEN PRESSURE: Handle 3-tuple format (x, y, pressure)
+                            if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                start_x, start_y, start_pressure = stroke[i]
+                                end_x, end_y, end_pressure = stroke[i + 1]
+                            else:
+                                # Fallback for old format or when pressure is disabled
+                                if len(stroke[i]) == 3:
+                                    start_x, start_y, _ = stroke[i]
+                                    end_x, end_y, _ = stroke[i + 1]
+                                else:
+                                    start_x, start_y = stroke[i]
+                                    end_x, end_y = stroke[i + 1]
+                                start_pressure = end_pressure = 1.0
+
+                            # 🎨 PEN PRESSURE: Calculate dynamic thickness for the final render
+                            if self.pen_pressure_enabled:
+                                avg_pressure = (start_pressure + end_pressure) / 2.0
+                                # Scale thickness with zoom factor to maintain visual consistency
+                                base_thickness = max(1, int(self.line_thickness * avg_pressure))
+                                dynamic_thickness = max(1, int(base_thickness * zoom_factor))
+                            else:
+                                # Scale regular thickness with zoom factor too
+                                dynamic_thickness = max(1, int(self.line_thickness * zoom_factor))
+
+                            # Create a pen with the correct thickness for this specific segment
+                            pen = QPen(self.line_color, dynamic_thickness, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                            painter.setPen(pen)
+
+                            # Apply SAME coordinate transformation as real-time drawing
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+
+                            # Apply rotation and flips (same as real-time drawing)
+                            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                                # Transform start point
+                                if self.rotation_angle == 90:
+                                    temp_start_x = original_size.width() * scale_x - display_start_y + draw_x
+                                    temp_start_y = display_start_x - draw_x + draw_y
+                                elif self.rotation_angle == 180:
+                                    temp_start_x = original_size.width() * scale_x - display_start_x + draw_x
+                                    temp_start_y = original_size.height() * scale_y - display_start_y + draw_y
+                                elif self.rotation_angle == 270:
+                                    temp_start_x = display_start_y - draw_y + draw_x
+                                    temp_start_y = original_size.height() * scale_y - display_start_x + draw_x
+                                else:
+                                    temp_start_x = display_start_x
+                                    temp_start_y = display_start_y
+
+                                # Transform end point
+                                if self.rotation_angle == 90:
+                                    temp_end_x = original_size.width() * scale_x - display_end_y + draw_x
+                                    temp_end_y = display_end_x - draw_x + draw_y
+                                elif self.rotation_angle == 180:
+                                    temp_end_x = original_size.width() * scale_x - display_end_x + draw_x
+                                    temp_end_y = original_size.height() * scale_y - display_end_y + draw_y
+                                elif self.rotation_angle == 270:
+                                    temp_end_x = display_end_y - draw_y + draw_x
+                                    temp_end_y = original_size.height() * scale_y - display_end_x + draw_x
+                                else:
+                                    temp_end_x = display_end_x
+                                    temp_end_y = display_end_y
+
+                                # Apply flips
+                                if self.flipped_h:
+                                    temp_start_x = (label_size.width() - temp_start_x + draw_x) - draw_x + draw_x
+                                    temp_end_x = (label_size.width() - temp_end_x + draw_x) - draw_x + draw_x
+                                if self.flipped_v:
+                                    temp_start_y = (label_size.height() - temp_start_y + draw_y) - draw_y + draw_y
+                                    temp_end_y = (label_size.height() - temp_end_y + draw_y) - draw_y + draw_y
+
+                                display_start_x, display_start_y = temp_start_x, temp_start_y
+                                display_end_x, display_end_y = temp_end_x, temp_end_y
+
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    else:
+                        # ⚡ FAST: Use optimized Bresenham for maximum speed
+                        painter.setRenderHint(QPainter.Antialiasing, False)
+
+                        # Convert stroke points to display coordinates
+                        for i in range(len(stroke) - 1):
+                            # 🎨 PEN PRESSURE: Handle both old 2-tuple and new 3-tuple formats
+                            if len(stroke[i]) == 3:
+                                start_x, start_y, start_pressure = stroke[i]
+                                end_x, end_y, end_pressure = stroke[i + 1]
+                                # Use average pressure for this segment
+                                segment_pressure = (start_pressure + end_pressure) / 2.0
+                                base_thickness = max(1, int(self.line_thickness * segment_pressure))
+                                # Scale thickness with zoom factor to maintain visual consistency
+                                segment_thickness = max(1, int(base_thickness * zoom_factor))
+                            else:
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                # Scale regular thickness with zoom factor too
+                                segment_thickness = max(1, int(self.line_thickness * zoom_factor))
+
+                            # Set pressure-based pen thickness for this segment
+                            painter.setPen(QPen(self.line_color, segment_thickness, Qt.SolidLine))
+
+                            # Apply SAME coordinate transformation as real-time drawing
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+
+                            # Apply rotation and flips (same as real-time drawing)
+                            if self.rotation_angle != 0 or self.flipped_h or self.flipped_v:
+                                # Transform start point
+                                if self.rotation_angle == 90:
+                                    temp_start_x = original_size.width() * scale_x - display_start_y + draw_x
+                                    temp_start_y = display_start_x - draw_x + draw_y
+                                elif self.rotation_angle == 180:
+                                    temp_start_x = original_size.width() * scale_x - display_start_x + draw_x
+                                    temp_start_y = original_size.height() * scale_y - display_start_y + draw_y
+                                elif self.rotation_angle == 270:
+                                    temp_start_x = display_start_y - draw_y + draw_x
+                                    temp_start_y = original_size.height() * scale_y - display_start_x + draw_x
+                                else:
+                                    temp_start_x = display_start_x
+                                    temp_start_y = display_start_y
+
+                                # Transform end point
+                                if self.rotation_angle == 90:
+                                    temp_end_x = original_size.width() * scale_x - display_end_y + draw_x
+                                    temp_end_y = display_end_x - draw_x + draw_y
+                                elif self.rotation_angle == 180:
+                                    temp_end_x = original_size.width() * scale_x - display_end_x + draw_x
+                                    temp_end_y = original_size.height() * scale_y - display_end_y + draw_y
+                                elif self.rotation_angle == 270:
+                                    temp_end_x = display_end_y - draw_y + draw_x
+                                    temp_end_y = original_size.height() * scale_y - display_end_x + draw_x
+                                else:
+                                    temp_end_x = display_end_x
+                                    temp_end_y = display_end_y
+
+                                # Apply flips
+                                if self.flipped_h:
+                                    temp_start_x = (label_size.width() - temp_start_x + draw_x) - draw_x + draw_x
+                                    temp_end_x = (label_size.width() - temp_end_x + draw_x) - draw_x + draw_x
+                                if self.flipped_v:
+                                    temp_start_y = (label_size.height() - temp_start_y + draw_y) - draw_y + draw_y
+                                    temp_end_y = (label_size.height() - temp_end_y + draw_y) - draw_y + draw_y
+
+                                display_start_x, display_start_y = temp_start_x, temp_start_y
+                                display_end_x, display_end_y = temp_end_x, temp_end_y
+
+                            # Draw the line segment
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
             
             painter.end()
             scaled_pixmap = final_pixmap
@@ -3261,7 +3681,9 @@ class RandomImageViewer(QMainWindow):
             if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                 painter = QPainter(blank_pixmap)
                 painter.setRenderHint(QPainter.Antialiasing, False)
-                painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                # Apply zoom scaling to line thickness for consistent visual appearance
+                zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                 
                 # Use the same coordinate transformations as above
                 original_size = self.original_pixmap.size()
@@ -3301,19 +3723,70 @@ class RandomImageViewer(QMainWindow):
                     painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                 
                 # Draw free strokes
-                painter.setRenderHint(QPainter.Antialiasing, True)
-                for stroke in self.drawn_free_strokes:
-                    if len(stroke) < 2:
-                        continue
-                    for i in range(len(stroke) - 1):
-                        start_x, start_y = stroke[i]
-                        end_x, end_y = stroke[i + 1]
-                        display_start_x = int(start_x * scale_x) + draw_x
-                        display_start_y = int(start_y * scale_y) + draw_y
-                        display_end_x = int(end_x * scale_x) + draw_x
-                        display_end_y = int(end_y * scale_y) + draw_y
-                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
-                painter.setRenderHint(QPainter.Antialiasing, False)
+                if self.line_antialiasing and self.line_thickness > 1:
+                    # ✨ SMOOTH: Use antialiasing for professional quality
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                    
+                    for stroke in self.drawn_free_strokes:
+                        if len(stroke) < 2:
+                            continue
+                        for i in range(len(stroke) - 1):
+                            # 🎨 PEN PRESSURE: Handle both old 2-tuple and new 3-tuple formats
+                            if len(stroke[i]) == 3:
+                                start_x, start_y, start_pressure = stroke[i]
+                                end_x, end_y, end_pressure = stroke[i + 1]
+                                # Use average pressure for this segment
+                                segment_pressure = (start_pressure + end_pressure) / 2.0
+                                base_thickness = max(1, int(self.line_thickness * segment_pressure))
+                                # Scale thickness with zoom factor to maintain visual consistency
+                                segment_thickness = max(1, int(base_thickness * zoom_factor))
+                            else:
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                # Scale regular thickness with zoom factor too
+                                segment_thickness = max(1, int(self.line_thickness * zoom_factor))
+                            
+                            # Set pressure-based pen for this segment
+                            pen = QPen(self.line_color, segment_thickness, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                            painter.setPen(pen)
+                            
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                else:
+                    # ⚡ FAST: Direct rendering for maximum speed
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    
+                    for stroke in self.drawn_free_strokes:
+                        if len(stroke) < 2:
+                            continue
+                        for i in range(len(stroke) - 1):
+                            # 🎨 PEN PRESSURE: Handle both old 2-tuple and new 3-tuple formats
+                            if len(stroke[i]) == 3:
+                                start_x, start_y, start_pressure = stroke[i]
+                                end_x, end_y, end_pressure = stroke[i + 1]
+                                # Use average pressure for this segment
+                                segment_pressure = (start_pressure + end_pressure) / 2.0
+                                base_thickness = max(1, int(self.line_thickness * segment_pressure))
+                                # Scale thickness with zoom factor to maintain visual consistency
+                                segment_thickness = max(1, int(base_thickness * zoom_factor))
+                            else:
+                                start_x, start_y = stroke[i]
+                                end_x, end_y = stroke[i + 1]
+                                # Scale regular thickness with zoom factor too
+                                segment_thickness = max(1, int(self.line_thickness * zoom_factor))
+                            
+                            # Set pressure-based pen for this segment
+                            painter.setPen(QPen(self.line_color, segment_thickness, Qt.SolidLine))
+                            
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                 
                 painter.end()
             
@@ -4504,7 +4977,6 @@ class RandomImageViewer(QMainWindow):
 
     def toggle_free_draw(self, checked):
         """Toggle free draw mode (continuous drawing)"""
-        print(f"DEBUG: Free draw mode toggled: {checked}")
         self.free_draw_mode = checked
         if checked:
             # Disable other line modes when this one is activated
@@ -4514,12 +4986,18 @@ class RandomImageViewer(QMainWindow):
             self.line_tool_btn.setChecked(False)
             self.hline_tool_btn.setChecked(False)
             self.free_line_tool_btn.setChecked(False)
-            print(f"DEBUG: Free draw mode activated, other modes disabled")
+            # Enable tablet tracking for pressure sensitivity, but handle events carefully
+            if hasattr(self, 'image_label'):
+                self.image_label.setAttribute(Qt.WA_TabletTracking, True)
+            print(f"Free draw mode activated - pen pressure enabled")
         if not checked:
             # Reset drawing state when mode is deactivated
             self.current_stroke = None
             self.is_drawing = False
-            print(f"DEBUG: Free draw mode deactivated")
+            # Disable tablet tracking for normal UI interaction
+            if hasattr(self, 'image_label'):
+                self.image_label.setAttribute(Qt.WA_TabletTracking, False)
+            print(f"Free draw mode deactivated")
         self._update_cursor_and_status()
 
     def _update_cursor_and_status(self):
@@ -4545,6 +5023,52 @@ class RandomImageViewer(QMainWindow):
         else:
             self.image_label.setCursor(Qt.ArrowCursor)
             self.status.showMessage("")
+
+    def toggle_pen_pressure(self, checked):
+        """Toggle pen pressure sensitivity"""
+        self.pen_pressure_enabled = checked
+        # Reset current pressure and tablet pressure to default when disabled
+        if not checked:
+            self._current_pressure = 1.0
+            self._tablet_pressure = 1.0
+        # Update button appearance
+        if hasattr(self, 'pen_pressure_btn'):
+            self.pen_pressure_btn.setText("🎨" if checked else "✏")
+            self.pen_pressure_btn.setToolTip("Pen Pressure: ON (varies thickness)" if checked else "Pen Pressure: OFF (fixed thickness)")
+        
+        # Clear caches to force redraw with new pressure setting
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        
+        if self.current_image:
+            self.display_image(self.current_image)
+        
+        self.status.showMessage(f"Pen pressure sensitivity {'enabled' if checked else 'disabled'}")
+
+    def test_pen_pressure(self):
+        """Test pen pressure detection - call this to check if your tablet is working"""
+        print("🎨 PEN PRESSURE TEST: Click and drag with your pen/stylus to test pressure detection")
+        print("🎨 PEN PRESSURE TEST: Look for pressure values in the console output")
+        print("🎨 PEN PRESSURE TEST: If you see values other than 1.000, your tablet is working!")
+        self.status.showMessage("Pen pressure test active - draw with your pen to check detection")
+
+    def toggle_line_antialiasing(self, checked):
+        """Toggle antialiasing for smoother line drawing"""
+        self.line_antialiasing = checked
+        # Clear caches to force redraw with new antialiasing setting
+        if hasattr(self, '_lut_process_cache'):
+            self._lut_process_cache.clear()
+        self.enhancement_cache.clear()
+        self.scaled_cache.clear()
+        # Update button appearance
+        if hasattr(self, 'antialiasing_btn'):
+            self.antialiasing_btn.setText("✨" if checked else "⚡")
+            self.antialiasing_btn.setToolTip("Antialiasing: ON (Smoother)" if checked else "Antialiasing: OFF (Faster)")
+        if self.current_image:
+            self.display_image(self.current_image)
+        self.status.showMessage(f"Line antialiasing {'enabled' if checked else 'disabled'}")
 
     def update_line_thickness(self, value):
         self.line_thickness = value
@@ -4653,12 +5177,12 @@ class RandomImageViewer(QMainWindow):
             
             self.status.showMessage(f"Line drawn from ({start_x:.0f}, {start_y:.0f}) to ({end_x:.0f}, {end_y:.0f})")
 
-    def start_free_draw_stroke(self, x, y):
+    def start_free_draw_stroke(self, x, y, pressure=1.0):
         """⚡ PERFORMANCE: Start a new free draw stroke with aggressive caching"""
-        print(f"DEBUG: Starting optimized free draw stroke at ({x:.1f}, {y:.1f})")
+        print(f"Starting optimized free draw stroke at ({x:.1f}, {y:.1f}) with pressure {pressure:.2f}")
         
-        # Initialize stroke data
-        self.current_stroke = [(x, y)]
+        # Initialize stroke data with pressure information
+        self.current_stroke = [(x, y, pressure)]
         self.is_drawing_free_stroke = True
         
         # ⚡ AGGRESSIVE CACHING: Pre-calculate all coordinate conversion data
@@ -4725,41 +5249,41 @@ class RandomImageViewer(QMainWindow):
             # Initialize last point for incremental drawing
             self.last_draw_point = None
             
-            print(f"DEBUG: Optimized drawing cache initialized - ready for true real-time performance")
+            print(f"Optimized drawing cache initialized - ready for true real-time performance")
             self.status.showMessage("Ultra-fast real-time free drawing active")
             
         except Exception as e:
-            print(f"DEBUG: Error initializing drawing cache: {e}")
+            print(f"Error initializing drawing cache: {e}")
             self.is_drawing_free_stroke = False
 
-    def add_free_draw_point(self, x, y):
+    def add_free_draw_point(self, x, y, pressure=1.0):
         """⚡ INCREMENTAL PAINTING: Add point with ultra-fast incremental drawing"""
         if not self.is_drawing_free_stroke or not self.drawing_cache:
             return
-            
-        # Add to stroke data
-        self.current_stroke.append((x, y))
-        
+
+        # Add to stroke data (store original coordinates with pressure)
+        self.current_stroke.append((x, y, pressure))
+
         # ⚡ ULTRA-FAST coordinate conversion using cached data
         cache = self.drawing_cache
         label_size = cache['label_size']
         zoom_factor = cache['zoom_factor']
-        
+
         # Convert to screen coordinates using cached parameters
         rotation = cache['rotation']
         original_size = cache['original_size']
-        
+
         if rotation == 90 or rotation == 270:
             scale_x = cache['zoomed_width'] / original_size.height()
             scale_y = cache['zoomed_height'] / original_size.width()
         else:
             scale_x = cache['zoomed_width'] / original_size.width()
             scale_y = cache['zoomed_height'] / original_size.height()
-        
+
         # Apply transformations using cached data
         display_x = x * scale_x
         display_y = y * scale_y
-        
+
         # Apply rotation (reverse transformation)
         if rotation == 90:
             screen_x = original_size.width() * scale_x - display_y
@@ -4773,35 +5297,105 @@ class RandomImageViewer(QMainWindow):
         else:  # 0 degrees
             screen_x = display_x
             screen_y = display_y
-        
+
         # Apply flips
         if cache['flipped_h']:
             screen_x = cache['zoomed_width'] - screen_x
         if cache['flipped_v']:
             screen_y = cache['zoomed_height'] - screen_y
-        
+
         # Final screen position
         final_x = screen_x + cache['draw_x']
         final_y = screen_y + cache['draw_y']
-        
+
         # ⚡ INCREMENTAL PAINTING: Only paint the new segment
         if self.last_draw_point is not None:
-            self._paint_stroke_segment_realtime(self.last_draw_point, (final_x, final_y))
+            # 🎨 PEN PRESSURE: Pass pressure to painting method
+            self._paint_stroke_segment_realtime(self.last_draw_point, (final_x, final_y), pressure)
         else:
             # First point - paint a small dot
-            self._paint_stroke_segment_realtime((final_x, final_y), (final_x, final_y))
-        
+            self._paint_stroke_segment_realtime((final_x, final_y), (final_x, final_y), pressure)
+
         self.last_draw_point = (final_x, final_y)
 
-    def _paint_stroke_segment_realtime(self, start_point, end_point):
-        """⚡ ULTRA-FAST: Direct pixel manipulation for true real-time performance"""
+    def _paint_stroke_segment_realtime(self, start_point, end_point, pressure=1.0):
+        """⚡ ULTRA-FAST: Hybrid drawing with performance/quality options and pressure support"""
         if not self.temp_stroke_overlay:
             return
             
-        # ⚡ DIRECT PIXEL ACCESS: Use QImage for lightning-fast pixel manipulation
+        # Choose drawing method based on performance mode and antialiasing settings
+        use_smooth = (self.line_antialiasing and self.line_thickness > 1) or not self.performance_mode
+        
+        # 🎨 PEN PRESSURE: Use stored current pressure for real-time painting
+        if self.pen_pressure_enabled:
+            current_pressure = getattr(self, '_current_pressure', pressure)
+            base_thickness = max(1, int(self.line_thickness * current_pressure))
+            # Apply zoom factor for consistent visual thickness
+            zoom_factor = self.image_label.zoom_factor if hasattr(self, 'image_label') else 1.0
+            dynamic_thickness = max(1, int(base_thickness * zoom_factor))
+        else:
+            # Apply zoom factor for consistent visual thickness
+            zoom_factor = self.image_label.zoom_factor if hasattr(self, 'image_label') else 1.0
+            dynamic_thickness = max(1, int(self.line_thickness * zoom_factor))
+        
+        if use_smooth:
+            # ✨ HIGH-QUALITY: Use QPainter with antialiasing for smooth lines
+            self._paint_smooth_segment(start_point, end_point, dynamic_thickness)
+        else:
+            # ⚡ ULTRA-FAST: Direct pixel manipulation for maximum speed
+            self._paint_fast_segment(start_point, end_point, dynamic_thickness)
+        
+        # ⚡ TIMER-BASED UPDATE: Schedule display update
+        if self.stroke_update_timer.isActive():
+            self.stroke_update_timer.stop()
+        self.stroke_update_timer.start()
+
+    def _paint_smooth_segment(self, start_point, end_point, thickness=None):
+        """✨ HIGH-QUALITY: Smooth antialiased line drawing using QPainter"""
         if not hasattr(self, '_stroke_image'):
-            # Convert pixmap to image once for direct pixel access
             self._stroke_image = self.temp_stroke_overlay.toImage()
+            
+        # Use provided thickness or fall back to default
+        line_thickness = thickness if thickness is not None else self.line_thickness
+            
+        # 🎨 PEN PRESSURE: Only adjust thickness if no thickness was provided (fallback case)
+        if thickness is None and self.pen_pressure_enabled and hasattr(self, '_current_pressure'):
+            avg_pressure = self._current_pressure
+            line_thickness = max(1, int(line_thickness * avg_pressure))
+            
+        # Create painter for smooth drawing with proper error handling
+        painter = QPainter()
+        if not painter.begin(self._stroke_image):
+            print("ERROR: Failed to begin painting on stroke image")
+            return
+            
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            
+            # Configure pen for smooth lines with dynamic thickness
+            pen = QPen(self.line_color, line_thickness, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            
+            # Draw smooth line segment
+            x0, y0 = start_point
+            x1, y1 = end_point
+            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+        finally:
+            painter.end()
+
+    def _paint_fast_segment(self, start_point, end_point, thickness=None):
+        """⚡ ULTRA-FAST: Direct pixel manipulation for maximum speed"""
+        if not hasattr(self, '_stroke_image'):
+            self._stroke_image = self.temp_stroke_overlay.toImage()
+            
+        # Use provided thickness or fall back to default
+        line_thickness = thickness if thickness is not None else self.line_thickness
+            
+        # 🎨 PEN PRESSURE: Only adjust thickness if no thickness was provided (fallback case)
+        if thickness is None and self.pen_pressure_enabled and hasattr(self, '_current_pressure'):
+            avg_pressure = self._current_pressure
+            line_thickness = max(1, int(line_thickness * avg_pressure))
             
         image = self._stroke_image
         
@@ -4812,7 +5406,7 @@ class RandomImageViewer(QMainWindow):
         # Handle single point (dot) - ultra-fast
         if x0 == x1 and y0 == y1:
             if 0 <= x0 < image.width() and 0 <= y0 < image.height():
-                image.setPixel(x0, y0, 0xFFFFFFFF)  # Pre-calculated white RGBA
+                image.setPixel(x0, y0, self._get_pixel_color())
             return
             
         # ⚡ OPTIMIZED BRESENHAM: Integer-only arithmetic for maximum speed
@@ -4822,40 +5416,85 @@ class RandomImageViewer(QMainWindow):
         sy = 1 if y0 < y1 else -1
         err = dx - dy
         
-        # Pre-calculate bounds check to avoid repeated calculations
+        # Pre-calculate bounds and color
         width = image.width()
         height = image.height()
-        white_pixel = 0xFFFFFFFF  # Pre-calculated white RGBA value
+        pixel_color = self._get_pixel_color()
         
-        while True:
-            # ⚡ BOUNDS CHECK + PIXEL SET: Combined for maximum performance
-            if 0 <= x0 < width and 0 <= y0 < height:
-                image.setPixel(x0, y0, white_pixel)
+        # Draw thicker lines if needed
+        if line_thickness == 1:
+            # Single pixel line
+            while True:
+                if 0 <= x0 < width and 0 <= y0 < height:
+                    image.setPixel(x0, y0, pixel_color)
+                    
+                if x0 == x1 and y0 == y1:
+                    break
+                    
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    x0 += sx
+                if e2 < dx:
+                    err += dx
+                    y0 += sy
+        else:
+            # Multi-pixel thickness - draw multiple parallel lines
+            for t in range(-(line_thickness//2), line_thickness//2 + 1):
+                cx0, cy0 = x0, y0
+                cx1, cy1 = x1, y1
                 
-            if x0 == x1 and y0 == y1:
-                break
+                # Offset perpendicular to line direction
+                if dx > dy:
+                    cy0 += t
+                    cy1 += t
+                else:
+                    cx0 += t
+                    cy1 += t
                 
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x0 += sx
-            if e2 < dx:
-                err += dx
-                y0 += sy
-        
-        # ⚡ TIMER-BASED UPDATE: Schedule display update instead of immediate update
-        # This prevents overwhelming the event loop and provides true real-time performance
-        if self.stroke_update_timer.isActive():
-            self.stroke_update_timer.stop()
-        self.stroke_update_timer.start()
+                # Draw offset line
+                dx_t = abs(cx1 - cx0)
+                dy_t = abs(cy1 - cy0)
+                sx_t = 1 if cx0 < cx1 else -1
+                sy_t = 1 if cy0 < cy1 else -1
+                err_t = dx_t - dy_t
+                
+                while True:
+                    if 0 <= cx0 < width and 0 <= cy0 < height:
+                        image.setPixel(cx0, cy0, pixel_color)
+                        
+                    if cx0 == cx1 and cy0 == cy1:
+                        break
+                        
+                    e2 = 2 * err_t
+                    if e2 > -dy_t:
+                        err_t -= dy_t
+                        cx0 += sx_t
+                    if e2 < dx_t:
+                        err_t += dx_t
+                        cy0 += sy_t
+
+    def _get_pixel_color(self):
+        """Get pixel color value for direct pixel access in ARGB32 format"""
+        # Convert QColor to ARGB32 format for QImage.setPixel
+        color = self.line_color
+        return (color.alpha() << 24) | (color.red() << 16) | (color.green() << 8) | color.blue()
+
+    def _reset_stroke_image(self):
+        """Reset the stroke image to prevent painter conflicts"""
+        if hasattr(self, '_stroke_image'):
+            # Clear the reference to allow garbage collection
+            self._stroke_image = None
 
     def _update_display_with_overlay(self):
         """⚡ TIMER-BASED: Update display only when timer fires for optimal performance"""
         if not hasattr(self, '_stroke_image') or not self.temp_stroke_overlay:
             return
             
-        # Convert back to pixmap for display
-        self.temp_stroke_overlay = QPixmap.fromImage(self._stroke_image)
+        # ⚠️ FIX: Ensure no active painters before converting back to pixmap
+        # Create a copy of the image to avoid conflicts with active painters
+        stroke_image_copy = QImage(self._stroke_image)
+        self.temp_stroke_overlay = QPixmap.fromImage(stroke_image_copy)
             
         label = self.image_label
         if not label or not label.pixmap():
@@ -4879,12 +5518,12 @@ class RandomImageViewer(QMainWindow):
 
     def end_free_draw_stroke(self):
         """⚡ OPTIMIZED FINALIZATION: Clean finalization with single redraw"""
-        print(f"DEBUG: Ending optimized free draw stroke")
+        print(f"Ending optimized free draw stroke")
         
         if self.current_stroke is not None and len(self.current_stroke) > 1:
             # Add completed stroke to the permanent list
             self.drawn_free_strokes.append(self.current_stroke.copy())
-            print(f"DEBUG: Stroke completed with {len(self.current_stroke)} points, total strokes: {len(self.drawn_free_strokes)}")
+            print(f"Stroke completed with {len(self.current_stroke)} points, total strokes: {len(self.drawn_free_strokes)}")
             
             # ⚡ CLEAN FINALIZATION: Clear caches and perform single clean redraw
             if hasattr(self, '_lut_process_cache'):
@@ -4896,7 +5535,7 @@ class RandomImageViewer(QMainWindow):
             
             self.status.showMessage(f"Stroke finalized ({len(self.current_stroke)} points)")
         else:
-            print(f"DEBUG: Stroke too short or invalid: {self.current_stroke}")
+            print(f"Stroke too short or invalid: {self.current_stroke}")
         
         # ⚡ CLEANUP: Reset all performance optimization state
         self.current_stroke = None
@@ -6559,12 +7198,14 @@ class RandomImageViewer(QMainWindow):
                 if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                     painter = QPainter(final_pixmap)
                     painter.setRenderHint(QPainter.Antialiasing, False)
-                    painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                    # Determine zoom_factor first, then compute base thickness for non-pressure primitives
+                    zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                    zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                    painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                     
                     # Get transformation parameters
                     original_size = processed_pixmap.size()
                     label_size = self.image_label.size()
-                    zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
                     
                     # Calculate scaling factors
                     if self.rotation_angle == 90 or self.rotation_angle == 270:
@@ -6604,19 +7245,34 @@ class RandomImageViewer(QMainWindow):
                         display_end_y = int(end_y * scale_y) + draw_y
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                     
-                    # Draw free strokes
+                    # Draw free strokes (pressure + zoom aware)
                     painter.setRenderHint(QPainter.Antialiasing, True)
-                    for stroke in self.drawn_free_strokes:
-                        if len(stroke) < 2:
-                            continue
-                        for i in range(len(stroke) - 1):
-                            start_x, start_y = stroke[i]
-                            end_x, end_y = stroke[i + 1]
-                            display_start_x = int(start_x * scale_x) + draw_x
-                            display_start_y = int(start_y * scale_y) + draw_y
-                            display_end_x = int(end_x * scale_x) + draw_x
-                            display_end_y = int(end_y * scale_y) + draw_y
-                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    if self.drawn_free_strokes:
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                # Extract start point
+                                if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                    start_x, start_y, p1 = stroke[i]
+                                else:
+                                    start_x, start_y = stroke[i][:2]
+                                    p1 = 1.0
+                                # Extract end point
+                                if len(stroke[i + 1]) == 3 and self.pen_pressure_enabled:
+                                    end_x, end_y, p2 = stroke[i + 1]
+                                else:
+                                    end_x, end_y = stroke[i + 1][:2]
+                                    p2 = 1.0
+                                avg_pressure = (p1 + p2) / 2.0 if self.pen_pressure_enabled else 1.0
+                                base_thick = max(1, int(self.line_thickness * avg_pressure))
+                                seg_thick = max(1, int(base_thick * zoom_factor))
+                                painter.setPen(QPen(self.line_color, seg_thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                                display_start_x = int(start_x * scale_x) + draw_x
+                                display_start_y = int(start_y * scale_y) + draw_y
+                                display_end_x = int(end_x * scale_x) + draw_x
+                                display_end_y = int(end_y * scale_y) + draw_y
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                     painter.setRenderHint(QPainter.Antialiasing, False)
                     
                     painter.end()
@@ -6631,7 +7287,9 @@ class RandomImageViewer(QMainWindow):
                     if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                         painter = QPainter(blank_pixmap)
                         painter.setRenderHint(QPainter.Antialiasing, False)
-                        painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        # Apply zoom scaling to line thickness for consistent visual appearance
+                        zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                        painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                         
                         # Use the same coordinate transformations as above
                         original_size = processed_pixmap.size()
@@ -6675,19 +7333,32 @@ class RandomImageViewer(QMainWindow):
                             display_end_y = int(end_y * scale_y) + draw_y
                             painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         
-                        # Draw free strokes
+                        # Draw free strokes (pressure + zoom aware)
                         painter.setRenderHint(QPainter.Antialiasing, True)
-                        for stroke in self.drawn_free_strokes:
-                            if len(stroke) < 2:
-                                continue
-                            for i in range(len(stroke) - 1):
-                                start_x, start_y = stroke[i]
-                                end_x, end_y = stroke[i + 1]
-                                display_start_x = int(start_x * scale_x) + draw_x
-                                display_start_y = int(start_y * scale_y) + draw_y
-                                display_end_x = int(end_x * scale_x) + draw_x
-                                display_end_y = int(end_y * scale_y) + draw_y
-                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        if self.drawn_free_strokes:
+                            for stroke in self.drawn_free_strokes:
+                                if len(stroke) < 2:
+                                    continue
+                                for i in range(len(stroke) - 1):
+                                    if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                        start_x, start_y, p1 = stroke[i]
+                                    else:
+                                        start_x, start_y = stroke[i][:2]
+                                        p1 = 1.0
+                                    if len(stroke[i + 1]) == 3 and self.pen_pressure_enabled:
+                                        end_x, end_y, p2 = stroke[i + 1]
+                                    else:
+                                        end_x, end_y = stroke[i + 1][:2]
+                                        p2 = 1.0
+                                    avg_pressure = (p1 + p2)/2.0 if self.pen_pressure_enabled else 1.0
+                                    base_thick = max(1, int(self.line_thickness * avg_pressure))
+                                    seg_thick = max(1, int(base_thick * zoom_factor))
+                                    painter.setPen(QPen(self.line_color, seg_thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                                    display_start_x = int(start_x * scale_x) + draw_x
+                                    display_start_y = int(start_y * scale_y) + draw_y
+                                    display_end_x = int(end_x * scale_x) + draw_x
+                                    display_end_y = int(end_y * scale_y) + draw_y
+                                    painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         painter.setRenderHint(QPainter.Antialiasing, False)
                         
                         painter.end()
@@ -6724,7 +7395,10 @@ class RandomImageViewer(QMainWindow):
                     if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                         painter = QPainter(final_pixmap)
                         painter.setRenderHint(QPainter.Antialiasing, False)
-                        painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        # Apply zoom scaling to line thickness for consistent visual appearance
+                        zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                        zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                        painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                         
                         # Get transformation parameters
                         original_size = processed_pixmap.size()
@@ -6769,19 +7443,32 @@ class RandomImageViewer(QMainWindow):
                             display_end_y = int(end_y * scale_y) + draw_y
                             painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         
-                        # Draw free strokes
+                        # Draw free strokes (pressure + zoom aware)
                         painter.setRenderHint(QPainter.Antialiasing, True)
-                        for stroke in self.drawn_free_strokes:
-                            if len(stroke) < 2:
-                                continue
-                            for i in range(len(stroke) - 1):
-                                start_x, start_y = stroke[i]
-                                end_x, end_y = stroke[i + 1]
-                                display_start_x = int(start_x * scale_x) + draw_x
-                                display_start_y = int(start_y * scale_y) + draw_y
-                                display_end_x = int(end_x * scale_x) + draw_x
-                                display_end_y = int(end_y * scale_y) + draw_y
-                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                        if self.drawn_free_strokes:
+                            for stroke in self.drawn_free_strokes:
+                                if len(stroke) < 2:
+                                    continue
+                                for i in range(len(stroke) - 1):
+                                    if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                        start_x, start_y, p1 = stroke[i]
+                                    else:
+                                        start_x, start_y = stroke[i][:2]
+                                        p1 = 1.0
+                                    if len(stroke[i + 1]) == 3 and self.pen_pressure_enabled:
+                                        end_x, end_y, p2 = stroke[i + 1]
+                                    else:
+                                        end_x, end_y = stroke[i + 1][:2]
+                                        p2 = 1.0
+                                    avg_pressure = (p1 + p2)/2.0 if self.pen_pressure_enabled else 1.0
+                                    base_thick = max(1, int(self.line_thickness * avg_pressure))
+                                    seg_thick = max(1, int(base_thick * zoom_factor))
+                                    painter.setPen(QPen(self.line_color, seg_thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                                    display_start_x = int(start_x * scale_x) + draw_x
+                                    display_start_y = int(start_y * scale_y) + draw_y
+                                    display_end_x = int(end_x * scale_x) + draw_x
+                                    display_end_y = int(end_y * scale_y) + draw_y
+                                    painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                         painter.setRenderHint(QPainter.Antialiasing, False)
                         
                         painter.end()
@@ -6796,7 +7483,10 @@ class RandomImageViewer(QMainWindow):
                         if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                             painter = QPainter(blank_pixmap)
                             painter.setRenderHint(QPainter.Antialiasing, False)
-                            painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                            # Apply zoom scaling to line thickness for consistent visual appearance
+                            zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                            zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                            painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                             
                             # Use the same coordinate transformations as above
                             original_size = processed_pixmap.size()
@@ -6840,19 +7530,32 @@ class RandomImageViewer(QMainWindow):
                                 display_end_y = int(end_y * scale_y) + draw_y
                                 painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                             
-                            # Draw free strokes
+                            # Draw free strokes (pressure + zoom aware)
                             painter.setRenderHint(QPainter.Antialiasing, True)
-                            for stroke in self.drawn_free_strokes:
-                                if len(stroke) < 2:
-                                    continue
-                                for i in range(len(stroke) - 1):
-                                    start_x, start_y = stroke[i]
-                                    end_x, end_y = stroke[i + 1]
-                                    display_start_x = int(start_x * scale_x) + draw_x
-                                    display_start_y = int(start_y * scale_y) + draw_y
-                                    display_end_x = int(end_x * scale_x) + draw_x
-                                    display_end_y = int(end_y * scale_y) + draw_y
-                                    painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                            if self.drawn_free_strokes:
+                                for stroke in self.drawn_free_strokes:
+                                    if len(stroke) < 2:
+                                        continue
+                                    for i in range(len(stroke) - 1):
+                                        if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                            start_x, start_y, p1 = stroke[i]
+                                        else:
+                                            start_x, start_y = stroke[i][:2]
+                                            p1 = 1.0
+                                        if len(stroke[i + 1]) == 3 and self.pen_pressure_enabled:
+                                            end_x, end_y, p2 = stroke[i + 1]
+                                        else:
+                                            end_x, end_y = stroke[i + 1][:2]
+                                            p2 = 1.0
+                                        avg_pressure = (p1 + p2)/2.0 if self.pen_pressure_enabled else 1.0
+                                        base_thick = max(1, int(self.line_thickness * avg_pressure))
+                                        seg_thick = max(1, int(base_thick * zoom_factor))
+                                        painter.setPen(QPen(self.line_color, seg_thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                                        display_start_x = int(start_x * scale_x) + draw_x
+                                        display_start_y = int(start_y * scale_y) + draw_y
+                                        display_end_x = int(end_x * scale_x) + draw_x
+                                        display_end_y = int(end_y * scale_y) + draw_y
+                                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                             painter.setRenderHint(QPainter.Antialiasing, False)
                             
                             painter.end()
@@ -6891,7 +7594,10 @@ class RandomImageViewer(QMainWindow):
             if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                 painter = QPainter(final_pixmap)
                 painter.setRenderHint(QPainter.Antialiasing, False)
-                painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                # Apply zoom scaling to line thickness for consistent visual appearance
+                zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                 
                 # Get transformation parameters
                 original_size = preview_pixmap.size()
@@ -6936,19 +7642,32 @@ class RandomImageViewer(QMainWindow):
                     display_end_y = int(end_y * scale_y) + draw_y
                     painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                 
-                # Draw free strokes
+                # Draw free strokes (pressure + zoom aware)
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                for stroke in self.drawn_free_strokes:
-                    if len(stroke) < 2:
-                        continue
-                    for i in range(len(stroke) - 1):
-                        start_x, start_y = stroke[i]
-                        end_x, end_y = stroke[i + 1]
-                        display_start_x = int(start_x * scale_x) + draw_x
-                        display_start_y = int(start_y * scale_y) + draw_y
-                        display_end_x = int(end_x * scale_x) + draw_x
-                        display_end_y = int(end_y * scale_y) + draw_y
-                        painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                if self.drawn_free_strokes:
+                    for stroke in self.drawn_free_strokes:
+                        if len(stroke) < 2:
+                            continue
+                        for i in range(len(stroke) - 1):
+                            if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                start_x, start_y, p1 = stroke[i]
+                            else:
+                                start_x, start_y = stroke[i][:2]
+                                p1 = 1.0
+                            if len(stroke[i + 1]) == 3 and self.pen_pressure_enabled:
+                                end_x, end_y, p2 = stroke[i + 1]
+                            else:
+                                end_x, end_y = stroke[i + 1][:2]
+                                p2 = 1.0
+                            avg_pressure = (p1 + p2)/2.0 if self.pen_pressure_enabled else 1.0
+                            base_thick = max(1, int(self.line_thickness * avg_pressure))
+                            seg_thick = max(1, int(base_thick * zoom_factor))
+                            painter.setPen(QPen(self.line_color, seg_thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                            display_start_x = int(start_x * scale_x) + draw_x
+                            display_start_y = int(start_y * scale_y) + draw_y
+                            display_end_x = int(end_x * scale_x) + draw_x
+                            display_end_y = int(end_y * scale_y) + draw_y
+                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                 painter.setRenderHint(QPainter.Antialiasing, False)
                 
                 painter.end()
@@ -6963,7 +7682,10 @@ class RandomImageViewer(QMainWindow):
                 if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                     painter = QPainter(blank_pixmap)
                     painter.setRenderHint(QPainter.Antialiasing, False)
-                    painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                    # Apply zoom scaling to line thickness for consistent visual appearance
+                    zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                    zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                    painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                     
                     # Use the same coordinate transformations as above
                     original_size = preview_pixmap.size()
@@ -7007,19 +7729,32 @@ class RandomImageViewer(QMainWindow):
                         display_end_y = int(end_y * scale_y) + draw_y
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                     
-                    # Draw free strokes
+                    # Draw free strokes (pressure + zoom aware)
                     painter.setRenderHint(QPainter.Antialiasing, True)
-                    for stroke in self.drawn_free_strokes:
-                        if len(stroke) < 2:
-                            continue
-                        for i in range(len(stroke) - 1):
-                            start_x, start_y = stroke[i]
-                            end_x, end_y = stroke[i + 1]
-                            display_start_x = int(start_x * scale_x) + draw_x
-                            display_start_y = int(start_y * scale_y) + draw_y
-                            display_end_x = int(end_x * scale_x) + draw_x
-                            display_end_y = int(end_y * scale_y) + draw_y
-                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    if self.drawn_free_strokes:
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                    start_x, start_y, p1 = stroke[i]
+                                else:
+                                    start_x, start_y = stroke[i][:2]
+                                    p1 = 1.0
+                                if len(stroke[i + 1]) == 3 and self.pen_pressure_enabled:
+                                    end_x, end_y, p2 = stroke[i + 1]
+                                else:
+                                    end_x, end_y = stroke[i + 1][:2]
+                                    p2 = 1.0
+                                avg_pressure = (p1 + p2)/2.0 if self.pen_pressure_enabled else 1.0
+                                base_thick = max(1, int(self.line_thickness * avg_pressure))
+                                seg_thick = max(1, int(base_thick * zoom_factor))
+                                painter.setPen(QPen(self.line_color, seg_thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                                display_start_x = int(start_x * scale_x) + draw_x
+                                display_start_y = int(start_y * scale_y) + draw_y
+                                display_end_x = int(end_x * scale_x) + draw_x
+                                display_end_y = int(end_y * scale_y) + draw_y
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                     painter.setRenderHint(QPainter.Antialiasing, False)
                     
                     painter.end()
@@ -7051,7 +7786,10 @@ class RandomImageViewer(QMainWindow):
                 if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                     painter = QPainter(final_pixmap)
                     painter.setRenderHint(QPainter.Antialiasing, False)
-                    painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                    # Apply zoom scaling to line thickness for consistent visual appearance
+                    zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                    zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                    painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                     
                     # Simple scaling for emergency fallback
                     original_size = original_pixmap.size()
@@ -7080,19 +7818,32 @@ class RandomImageViewer(QMainWindow):
                         display_end_y = int(end_y * scale_y)
                         painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                     
-                    # Draw free strokes
+                    # Draw free strokes (pressure + zoom aware)
                     painter.setRenderHint(QPainter.Antialiasing, True)
-                    for stroke in self.drawn_free_strokes:
-                        if len(stroke) < 2:
-                            continue
-                        for i in range(len(stroke) - 1):
-                            start_x, start_y = stroke[i]
-                            end_x, end_y = stroke[i + 1]
-                            display_start_x = int(start_x * scale_x)
-                            display_start_y = int(start_y * scale_y)
-                            display_end_x = int(end_x * scale_x)
-                            display_end_y = int(end_y * scale_y)
-                            painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
+                    if self.drawn_free_strokes:
+                        for stroke in self.drawn_free_strokes:
+                            if len(stroke) < 2:
+                                continue
+                            for i in range(len(stroke) - 1):
+                                if len(stroke[i]) == 3 and self.pen_pressure_enabled:
+                                    start_x, start_y, p1 = stroke[i]
+                                else:
+                                    start_x, start_y = stroke[i][:2]
+                                    p1 = 1.0
+                                if len(stroke[i + 1]) == 3 and self.pen_pressure_enabled:
+                                    end_x, end_y, p2 = stroke[i + 1]
+                                else:
+                                    end_x, end_y = stroke[i + 1][:2]
+                                    p2 = 1.0
+                                avg_pressure = (p1 + p2)/2.0 if self.pen_pressure_enabled else 1.0
+                                base_thick = max(1, int(self.line_thickness * avg_pressure))
+                                seg_thick = max(1, int(base_thick * zoom_factor))
+                                painter.setPen(QPen(self.line_color, seg_thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                                display_start_x = int(start_x * scale_x)
+                                display_start_y = int(start_y * scale_y)
+                                display_end_x = int(end_x * scale_x)
+                                display_end_y = int(end_y * scale_y)
+                                painter.drawLine(display_start_x, display_start_y, display_end_x, display_end_y)
                     painter.setRenderHint(QPainter.Antialiasing, False)
                     
                     painter.end()
@@ -7107,7 +7858,10 @@ class RandomImageViewer(QMainWindow):
                     if self.lines_visible and (self.drawn_lines or self.drawn_horizontal_lines or self.drawn_free_lines or self.drawn_free_strokes):
                         painter = QPainter(blank_pixmap)
                         painter.setRenderHint(QPainter.Antialiasing, False)
-                        painter.setPen(QPen(self.line_color, self.line_thickness, Qt.SolidLine))
+                        # Apply zoom scaling to line thickness for consistent visual appearance
+                        zoom_factor = getattr(self.image_label, 'zoom_factor', 1.0)
+                        zoom_scaled_thickness = max(1, int(self.line_thickness * zoom_factor))
+                        painter.setPen(QPen(self.line_color, zoom_scaled_thickness, Qt.SolidLine))
                         
                         # Use the same coordinate transformations as above
                         original_size = original_pixmap.size()
@@ -7142,8 +7896,15 @@ class RandomImageViewer(QMainWindow):
                             if len(stroke) < 2:
                                 continue
                             for i in range(len(stroke) - 1):
-                                start_x, start_y = stroke[i]
-                                end_x, end_y = stroke[i + 1]
+                                # 🎨 PEN PRESSURE: Handle both old 2-tuple and new 3-tuple formats
+                                if len(stroke[i]) == 3:
+                                    start_x, start_y, _ = stroke[i]
+                                else:
+                                    start_x, start_y = stroke[i]
+                                if len(stroke[i + 1]) == 3:
+                                    end_x, end_y, _ = stroke[i + 1]
+                                else:
+                                    end_x, end_y = stroke[i + 1]
                                 display_start_x = int(start_x * scale_x)
                                 display_start_y = int(start_y * scale_y)
                                 display_end_x = int(end_x * scale_x)
