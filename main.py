@@ -5181,9 +5181,15 @@ class RandomImageViewer(QMainWindow):
         """⚡ PERFORMANCE: Start a new free draw stroke with aggressive caching"""
         print(f"Starting optimized free draw stroke at ({x:.1f}, {y:.1f}) with pressure {pressure:.2f}")
         
-        # Initialize stroke data with pressure information
-        self.current_stroke = [(x, y, pressure)]
+        # 🎨 PEN PRESSURE: Store initial pressure immediately
+        if self.pen_pressure_enabled:
+            self._current_pressure = pressure
+            print(f"🎨 INITIAL PRESSURE: Set to {pressure:.3f}")
+        
+        # Initialize stroke data with pressure information, but mark first point's pressure as pending
+        self.current_stroke = [(x, y, -1)] # Use -1 to indicate pending pressure
         self.is_drawing_free_stroke = True
+        self.last_draw_point = None # Reset last draw point
         
         # ⚡ AGGRESSIVE CACHING: Pre-calculate all coordinate conversion data
         try:
@@ -5310,10 +5316,38 @@ class RandomImageViewer(QMainWindow):
 
         # ⚡ INCREMENTAL PAINTING: Only paint the new segment
         if self.last_draw_point is not None:
-            # 🎨 PEN PRESSURE: Pass pressure to painting method
-            self._paint_stroke_segment_realtime(self.last_draw_point, (final_x, final_y), pressure)
+            # ✨ SMOOTH PATH: Add intermediate points for ultra-smooth curves
+            if self.line_antialiasing and self.free_draw_mode:
+                # Calculate distance between points
+                dx = final_x - self.last_draw_point[0]
+                dy = final_y - self.last_draw_point[1]
+                distance = (dx * dx + dy * dy) ** 0.5
+                
+                # If points are far apart, add intermediate points for smoothness
+                if distance > 3.0:
+                    num_steps = max(2, int(distance / 2.0))
+                    for i in range(1, num_steps):
+                        t = i / num_steps
+                        inter_x = self.last_draw_point[0] + dx * t
+                        inter_y = self.last_draw_point[1] + dy * t
+                        prev_point = (self.last_draw_point[0] + dx * (t - 1/num_steps), 
+                                     self.last_draw_point[1] + dy * (t - 1/num_steps)) if i > 1 else self.last_draw_point
+                        self._paint_stroke_segment_realtime(prev_point, (inter_x, inter_y), pressure)
+                    # Paint final segment
+                    self._paint_stroke_segment_realtime((self.last_draw_point[0] + dx * (num_steps-1)/num_steps, 
+                                                       self.last_draw_point[1] + dy * (num_steps-1)/num_steps), 
+                                                      (final_x, final_y), pressure)
+                else:
+                    # Normal segment painting for close points
+                    self._paint_stroke_segment_realtime(self.last_draw_point, (final_x, final_y), pressure)
+            else:
+                # 🎨 PEN PRESSURE: Pass pressure to painting method
+                self._paint_stroke_segment_realtime(self.last_draw_point, (final_x, final_y), pressure)
         else:
-            # First point - paint a small dot
+            # First point - paint a small dot with correct pressure
+            # 🎨 PEN PRESSURE: Ensure first point uses the actual pressure, not default
+            if self.pen_pressure_enabled:
+                self._current_pressure = pressure
             self._paint_stroke_segment_realtime((final_x, final_y), (final_x, final_y), pressure)
 
         self.last_draw_point = (final_x, final_y)
@@ -5324,12 +5358,14 @@ class RandomImageViewer(QMainWindow):
             return
             
         # Choose drawing method based on performance mode and antialiasing settings
-        use_smooth = (self.line_antialiasing and self.line_thickness > 1) or not self.performance_mode
+        # Use smooth drawing more aggressively for better quality, especially for free draw
+        use_smooth = self.line_antialiasing or not self.performance_mode or self.free_draw_mode
         
-        # 🎨 PEN PRESSURE: Use stored current pressure for real-time painting
+        # 🎨 PEN PRESSURE: Use the pressure parameter first, then fall back to stored pressure
         if self.pen_pressure_enabled:
-            current_pressure = getattr(self, '_current_pressure', pressure)
-            base_thickness = max(1, int(self.line_thickness * current_pressure))
+            # Prioritize the pressure parameter passed to this method (especially important for first point)
+            actual_pressure = pressure if pressure != 1.0 else getattr(self, '_current_pressure', pressure)
+            base_thickness = max(1, int(self.line_thickness * actual_pressure))
             # Apply zoom factor for consistent visual thickness
             zoom_factor = self.image_label.zoom_factor if hasattr(self, 'image_label') else 1.0
             dynamic_thickness = max(1, int(base_thickness * zoom_factor))
@@ -5351,18 +5387,13 @@ class RandomImageViewer(QMainWindow):
         self.stroke_update_timer.start()
 
     def _paint_smooth_segment(self, start_point, end_point, thickness=None):
-        """✨ HIGH-QUALITY: Smooth antialiased line drawing using QPainter"""
+        """✨ HIGH-QUALITY: Smooth antialiased line drawing with improved interpolation"""
         if not hasattr(self, '_stroke_image'):
             self._stroke_image = self.temp_stroke_overlay.toImage()
             
-        # Use provided thickness or fall back to default
+        # Use provided thickness directly - it's already calculated with pressure
         line_thickness = thickness if thickness is not None else self.line_thickness
-            
-        # 🎨 PEN PRESSURE: Only adjust thickness if no thickness was provided (fallback case)
-        if thickness is None and self.pen_pressure_enabled and hasattr(self, '_current_pressure'):
-            avg_pressure = self._current_pressure
-            line_thickness = max(1, int(line_thickness * avg_pressure))
-            
+        
         # Create painter for smooth drawing with proper error handling
         painter = QPainter()
         if not painter.begin(self._stroke_image):
@@ -5370,17 +5401,45 @@ class RandomImageViewer(QMainWindow):
             return
             
         try:
+            # ✨ ENHANCED ANTIALIASING: Use highest quality rendering
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.setRenderHint(QPainter.VerticalSubpixelPositioning, True)
+            painter.setRenderHint(QPainter.LosslessImageRendering, True)
             
-            # Configure pen for smooth lines with dynamic thickness
+            # Configure pen for ultra-smooth lines with the exact thickness provided
             pen = QPen(self.line_color, line_thickness, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(pen)
             
-            # Draw smooth line segment
+            # Get coordinates
             x0, y0 = start_point
             x1, y1 = end_point
-            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+            
+            # Calculate distance between points
+            dx = x1 - x0
+            dy = y1 - y0
+            distance = (dx * dx + dy * dy) ** 0.5
+            
+            # For very short segments, just draw a simple line
+            if distance < 2.0:
+                painter.drawLine(x0, y0, x1, y1)
+            else:
+                # ✨ SMOOTH INTERPOLATION: Draw multiple sub-segments for ultra-smooth curves
+                # Use adaptive subdivision based on distance
+                num_segments = max(2, int(distance / 2.0))
+                
+                for i in range(num_segments):
+                    t0 = i / num_segments
+                    t1 = (i + 1) / num_segments
+                    
+                    # Interpolate points
+                    seg_x0 = x0 + dx * t0
+                    seg_y0 = y0 + dy * t0
+                    seg_x1 = x0 + dx * t1
+                    seg_y1 = y0 + dy * t1
+                    
+                    painter.drawLine(seg_x0, seg_y0, seg_x1, seg_y1)
+                    
         finally:
             painter.end()
 
@@ -5389,13 +5448,8 @@ class RandomImageViewer(QMainWindow):
         if not hasattr(self, '_stroke_image'):
             self._stroke_image = self.temp_stroke_overlay.toImage()
             
-        # Use provided thickness or fall back to default
+        # Use provided thickness directly - it's already calculated with pressure
         line_thickness = thickness if thickness is not None else self.line_thickness
-            
-        # 🎨 PEN PRESSURE: Only adjust thickness if no thickness was provided (fallback case)
-        if thickness is None and self.pen_pressure_enabled and hasattr(self, '_current_pressure'):
-            avg_pressure = self._current_pressure
-            line_thickness = max(1, int(line_thickness * avg_pressure))
             
         image = self._stroke_image
         
