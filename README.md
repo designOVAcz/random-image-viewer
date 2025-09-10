@@ -20,6 +20,7 @@ A simple, modern, cross-platform desktop app to view random images from any fold
 - ⌨️ **Full Keyboard Support:** Complete shortcut system for all operations (arrows, F11, Esc, Ctrl+H/V, etc.)
 - 🔄 **Image Transformations:** Flip horizontal/vertical with visual state indicators
 - 📐 **Professional Line Drawing:** Three-mode annotation system (vertical, horizontal, free lines)
+- 🖊️ **Pen Pressure Support:** Full pressure-sensitive drawing with tablets/styluses (variable line thickness)
 - 🎨 **CUBE LUT Support:** Professional color grading with .cube LUT files and GPU acceleration
 - 🖥️ **Cross-platform:** Works on Windows, macOS, and Linux
 
@@ -49,6 +50,7 @@ A simple, modern, cross-platform desktop app to view random images from any fold
 4. **Viewing:** Press F11 for fullscreen, right-click "Show/Hide UI" for minimal mode
 5. **Enhance:** Use sliders for adjustments, apply LUTs for color grading
 6. **Annotate:** Use line drawing tools (📏 ━ ╱) for image analysis
+7. **Free Draw:** Use 🖊️ tool for pressure-sensitive drawing with pen/stylus (variable line thickness)
 
 ## Keyboard Shortcuts
 
@@ -83,26 +85,10 @@ You can compile this app to a standalone executable for Windows, Linux, or Mac u
 
 ---
 
-## Compiling to a Standalone Binary
-
-You can compile this app to a standalone executable for Windows, Linux, or Mac using [PyInstaller](https://pyinstaller.org/).
-
-1. **Install PyInstaller:**
-   ```sh
-   pip install pyinstaller
-   ```
-2. **Build the Executable:**
-   ```sh
-   pyinstaller --noconfirm --onefile --windowed main.py
-   ```
-   - The binary will be in the `dist/` folder.
-   - For cross-compiling, build on the target OS or use a cross-compilation toolchain.
-
----
-
 ## License
 
 MIT License. **Enjoy browsing your images!**
+
 
 
 
