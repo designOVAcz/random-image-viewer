@@ -159,15 +159,25 @@ def safe_load_pixmap(file_path):
     # Use the smart loader for better performance
     return smart_load_pixmap(file_path)
 
+def natural_sort_key(text):
+    """
+    Generate a key for natural sorting that handles numbers properly.
+    This makes '1.jpg' come before '10.jpg' instead of after it.
+    """
+    import re
+    def convert(text_part):
+        return int(text_part) if text_part.isdigit() else text_part.lower()
+    return [convert(c) for c in re.split(r'(\d+)', text)]
+
 def get_images_in_folder(folder):
     image_paths = []
     for root, _, files in os.walk(folder):
-        # Sort files in each directory to ensure deterministic traversal order
-        for f in sorted(files, key=lambda n: n.lower()):
+        # Sort files in each directory using natural sorting for proper number ordering
+        for f in sorted(files, key=natural_sort_key):
             if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS:
                 image_paths.append(os.path.join(root, f))
-    # Final global sort so overall list is alphabetical by full path
-    image_paths.sort(key=lambda p: p.lower())
+    # Final global sort using natural sorting so overall list is in proper order
+    image_paths.sort(key=lambda p: natural_sort_key(os.path.basename(p)))
     return image_paths
 
 def emoji_icon(emoji="🎲", size=128):
