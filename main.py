@@ -783,7 +783,16 @@ class ImageLabel(QLabel):
                 else:
                     pressure = mouse_pressure
                     
-            pressure = max(0.1, min(1.0, pressure))
+            # 🎨 IMPROVED PRESSURE INTERPOLATION: Better range and smoothing
+            # Use a wider range for more natural pressure variation
+            pressure = max(0.05, min(1.0, pressure))  # Allow lighter minimum pressure
+            
+            # 🎨 PRESSURE SMOOTHING: Apply smoothing to reduce jitter
+            if hasattr(self.parent_viewer, '_last_pressure'):
+                # Smooth the pressure using exponential moving average
+                smoothing_factor = 0.3  # Lower = more smoothing, higher = more responsive
+                pressure = (smoothing_factor * pressure) + ((1 - smoothing_factor) * self.parent_viewer._last_pressure)
+            self.parent_viewer._last_pressure = pressure
             
             # ⚡ ULTRA-FAST: Use cached coordinate conversion
             if not self.parent_viewer.drawing_cache:
@@ -2265,6 +2274,7 @@ class RandomImageViewer(QMainWindow):
         self.pen_pressure_enabled = True  # 🎨 NEW: Pen pressure sensitivity toggle
         self._current_pressure = 1.0  # 🎨 NEW: Current pressure value for real-time painting
         self._tablet_pressure = 1.0  # 🎨 NEW: Stored tablet pressure for mouse event compatibility
+        self._last_pressure = 1.0  # 🎨 NEW: Last pressure for smoothing interpolation
         # Always on top functionality
         self.always_on_top = False
 
@@ -5406,11 +5416,28 @@ class RandomImageViewer(QMainWindow):
         # Use smooth drawing more aggressively for better quality, especially for free draw
         use_smooth = self.line_antialiasing or not self.performance_mode or self.free_draw_mode
         
-        # 🎨 PEN PRESSURE: Use the pressure parameter first, then fall back to stored pressure
+        # 🎨 PEN PRESSURE: Improved pressure handling with better interpolation
         if self.pen_pressure_enabled:
-            # Prioritize the pressure parameter passed to this method (especially important for first point)
-            actual_pressure = pressure if pressure != 1.0 else getattr(self, '_current_pressure', pressure)
-            base_thickness = max(1, int(self.line_thickness * actual_pressure))
+            # Use the pressure parameter with better fallback logic
+            if pressure != 1.0:
+                actual_pressure = pressure
+            elif hasattr(self, '_current_pressure') and self._current_pressure != 1.0:
+                actual_pressure = self._current_pressure
+            elif hasattr(self, '_tablet_pressure') and self._tablet_pressure != 1.0:
+                actual_pressure = self._tablet_pressure
+            else:
+                actual_pressure = 1.0
+            
+            # 🎨 ENHANCED PRESSURE MAPPING: Use a curve for more natural feel
+            # Apply a slight curve to make light pressure more usable
+            curved_pressure = actual_pressure ** 0.8  # Power curve for more natural response
+            
+            # Map pressure to thickness with a better range
+            min_thickness = max(1, int(self.line_thickness * 0.2))  # Minimum 20% of base thickness
+            max_thickness = int(self.line_thickness * 1.5)  # Maximum 150% of base thickness
+            thickness_range = max_thickness - min_thickness
+            base_thickness = min_thickness + int(thickness_range * curved_pressure)
+            
             # Apply zoom factor for consistent visual thickness
             zoom_factor = self.image_label.zoom_factor if hasattr(self, 'image_label') else 1.0
             dynamic_thickness = max(1, int(base_thickness * zoom_factor))
