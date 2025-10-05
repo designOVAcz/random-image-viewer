@@ -2349,7 +2349,7 @@ class RandomImageViewer(QMainWindow):
         QTimer.singleShot(0, self._delayed_resize)
         # Auto-set default LUT folder if present
         # NOTE: trailing backslash in a raw string would escape the quote -> syntax error
-        self.default_lut_path = r"L:\_ART\LUTS"
+        self.default_lut_path = r"V:\LUTS"
         if os.path.isdir(self.default_lut_path):
             self.lut_folder = self.default_lut_path
             try:
@@ -4015,18 +4015,22 @@ class RandomImageViewer(QMainWindow):
             original_size = image.size()
             image_pixels = image.width() * image.height()
             
-            # Dynamic max size based on image complexity
-            if image_pixels > 4000000:  # Very large (>4MP)
-                max_lut_size = 1200  # Aggressive scaling for huge images
-            elif image_pixels > 2000000:  # Large (>2MP) 
-                max_lut_size = 1600  # Moderate scaling
+            # 🎨 IMPROVED QUALITY: Higher resolution limits for better quality
+            # Dynamic max size based on image complexity - significantly increased for better quality
+            if image_pixels > 16000000:  # Extremely large (>16MP)
+                max_lut_size = 3840  # 4K resolution - still very high quality
+            elif image_pixels > 8000000:  # Very large (>8MP)
+                max_lut_size = 4096  # Full 4K quality
+            elif image_pixels > 4000000:  # Large (>4MP)
+                max_lut_size = 3200  # Higher quality for large images
             else:
-                max_lut_size = 2048  # Keep quality for smaller images
+                max_lut_size = 4096  # No scaling for smaller images - preserve full quality
             
-            # Only scale down very large images, keep more detail
+            # Only scale down extremely large images, preserve quality as much as possible
             if image.width() > max_lut_size or image.height() > max_lut_size:
                 scale_factor = min(max_lut_size / image.width(), max_lut_size / image.height())
                 scaled_size = QSize(int(image.width() * scale_factor), int(image.height() * scale_factor))
+                # 🎨 QUALITY: Use SmoothTransformation for highest quality scaling
                 image = image.scaled(scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 is_scaled = True
             else:
@@ -4050,12 +4054,14 @@ class RandomImageViewer(QMainWindow):
                     print("✓ GPU LUT processing successful - colors should now be correct")
                     # GPU processing successful
                     if is_scaled:
+                        # 🎨 QUALITY: Use high-quality scaling when upscaling back to original size
                         gpu_result = gpu_result.scaled(original_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     
                     result_pixmap = QPixmap.fromImage(gpu_result)
                     
-                    # Smart cache management
-                    max_cache_size = 8 if image_pixels < 1000000 else 4
+                    # 🎨 QUALITY: Smart cache management with higher limits for quality processing
+                    # Reduce cache size since we're processing higher resolution images
+                    max_cache_size = 4 if image_pixels < 2000000 else 2
                     if len(self._lut_process_cache) > max_cache_size:
                         oldest_key = next(iter(self._lut_process_cache))
                         del self._lut_process_cache[oldest_key]
@@ -4088,8 +4094,8 @@ class RandomImageViewer(QMainWindow):
             
             result_pixmap = QPixmap.fromImage(image)
             
-            # Smart cache management - keep more entries for smaller images
-            max_cache_size = 8 if image_pixels < 1000000 else 4
+            # 🎨 QUALITY: Smart cache management - smaller cache for higher quality processing
+            max_cache_size = 4 if image_pixels < 2000000 else 2
             if len(self._lut_process_cache) > max_cache_size:
                 # Remove oldest entries
                 oldest_key = next(iter(self._lut_process_cache))
